@@ -46,7 +46,7 @@ class EpochBatches:
     def __iter__(self):
         batches = self.iter_batches()
         if self.display is not None:
-            return self.display.progress(batches, total=self.steps, training_frame=sys._getframe(1))
+            return iter(self.display.progress(batches, total=self.steps, training_frame=sys._getframe(1)))
         return batches
 
     def iter_batches(self):
