@@ -1,3 +1,9 @@
+import sys
+from pathlib import Path
+
+sys.path.append(str(Path(__file__).resolve().parents[2]))
+from simulation import simulate_observations
+
 from model import SpNet, HWViT
 import torch
 import os
@@ -44,35 +50,8 @@ def main(args):
                         [12, 13, 14, 15]])
 
     if args.simulate == True:
-        if args.data_id == []:
-            data_names = os.listdir(data_path)
-        else:
-            data_names = [file for file in os.listdir(data_path) if file in args.data_id]
-        for data_name in tqdm.tqdm(data_names):
-            data_dir = os.path.join(data_path, data_name)
-            if args.dataset == "CAVE":
-                hrms = scio.loadmat(data_dir)['b']
-            elif args.dataset == "ICVL":
-                hrms = h5py.File(data_dir)["rad"][:]
-                hrms = numpy.rot90(hrms.transpose(2, 1, 0))
-                hrms /= hrms.max((0, 1))
-            hrms_select_bands = hrms[:hrms.shape[0]//(args.msfa_size*args.spatial_ratio)*(args.msfa_size*args.spatial_ratio),
-                                    :hrms.shape[1]//(args.msfa_size*args.spatial_ratio)*(args.msfa_size*args.spatial_ratio),
-                                    12:28].astype(numpy.float32)
-            
-            # MS simulate
-            # downsampling
-            ms_blur_tensor = torch.from_numpy(hrms_select_bands).permute(2, 0, 1).unsqueeze(0)
-            lrms_tensor = torch.nn.functional.avg_pool2d(ms_blur_tensor, 2, 2)
-            lrms = lrms_tensor[0].permute(1, 2, 0).numpy()
-
-            # mosaicing
-            mosaic = utils.MSFA_filter(lrms, MSFA)
-
-            # PAN simulate
-            spe_res = numpy.array([1., 1, 2, 4, 8, 9, 10, 12, 16, 12, 10, 9, 7, 3, 2, 1])
-            spe_res /= spe_res.sum()
-            pan = numpy.sum(hrms_select_bands * spe_res, axis=-1, keepdims=True)
+        for data_name, hrms, lrms, mosaic, pan in tqdm.tqdm(simulate_observations(args, "test")):
+            hrms_select_bands = hrms
 
             mosaics.append(mosaic)
             pans.append(pan)

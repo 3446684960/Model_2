@@ -1,3 +1,9 @@
+import sys
+from pathlib import Path
+
+sys.path.append(str(Path(__file__).resolve().parents[2]))
+from simulation import simulate_observations, simulation_cache_path
+
 import numpy
 import os
 import scipy.io as scio
@@ -26,59 +32,19 @@ def crop_to_patch(img, size, stride):
 
 class MakeSimulateDatasetforDemosaic(Dataset):
     def __init__(self, args, type="train"):
-        cache_path = os.path.join(args.cache_path, type + "_cache.pkl")
+        cache_path = simulation_cache_path(args, type)
         self.train_size = args.train_size
         if not os.path.exists(cache_path):
             self.mosaic, self.target = [], []
             base_path = os.path.join(args.data_path, args.dataset, type)
             print("Cache file not found. Generate it from: ", base_path)
-            hrms_imgs = os.listdir(base_path)
 
             if type == "train":
                 numpy.random.seed(42)
             elif type == "test":
                 numpy.random.seed(22)
-            for hrms_name in tqdm.tqdm(hrms_imgs):
-                if args.dataset == "CAVE":
-                    hrms = scio.loadmat(os.path.join(base_path, hrms_name))["b"]
-                    hrms = hrms[:, :, 12:28]
-                elif args.dataset == "chikusei":
-                    hrms = scio.loadmat(os.path.join(base_path, hrms_name))["chikusei"]
-                elif args.dataset == "ICVL":
-                    with h5py.File(os.path.join(base_path, hrms_name), "r") as source:
-                        hrms = source["rad"][:]
-                    hrms = numpy.rot90(hrms.transpose(2, 1, 0))
-                    hrms = hrms / hrms.max((0, 1))
-                    hrms = hrms[:, :, 12:28]
-                hrms = hrms[:hrms.shape[0]//(args.msfa_size*args.spatial_ratio)*(args.msfa_size*args.spatial_ratio),
-                                        :hrms.shape[1]//(args.msfa_size*args.spatial_ratio)*(args.msfa_size*args.spatial_ratio)].astype(numpy.float32)
-
-                MSFA = numpy.array([[0, 1, 2, 3],
-                                    [4, 5, 6, 7],
-                                    [8, 9, 10, 11],
-                                    [12, 13, 14, 15]])
-                # MS simulate
-                # downsampling
-                ms_tensor = torch.from_numpy(hrms).permute(2, 0, 1).unsqueeze(0)
-                lrms_tensor = torch.nn.functional.avg_pool2d(ms_tensor, 2, 2)
-                lrms = lrms_tensor[0].permute(1, 2, 0).numpy()
-
-                # mosaicing
-                mosaic = utils.MSFA_filter(lrms, MSFA)
-
-                # adding noise, numpy.random.seed(42)
-                std = numpy.random.uniform(args.noise_level[0], args.noise_level[1])
-                mosaic_noise = mosaic + numpy.random.normal(size=mosaic.shape) * std
-                mosaic_noise = numpy.clip(mosaic_noise, a_min=0, a_max=1.0)
-
-                # PAN simulate
-                spe_res = numpy.array([1., 1, 2, 4, 8, 9, 10, 12, 16, 12, 10, 9, 7, 3, 2, 1])
-                spe_res /= spe_res.sum()
-                pan = numpy.sum(hrms * spe_res, axis=-1, keepdims=True)
-                # adding noise, set numpy.random.seed(42)
-                std = numpy.random.uniform(args.noise_level[0], args.noise_level[1])
-                pan_noise = pan + numpy.random.normal(size=pan.shape) * std
-                pan_noise = numpy.clip(pan_noise, a_min=0, a_max=1.0)
+            for hrms_name, hrms, lrms, mosaic, pan in tqdm.tqdm(simulate_observations(args, type)):
+                mosaic_noise = mosaic
 
                 if type == "train":
                     mosaic_patches = crop_to_patch(mosaic_noise, args.train_size, args.stride)
@@ -174,49 +140,23 @@ def input_matrix_wpn(inH, inW, msfa_size):
 class MakeSimulateDatasetforPansharpening(Dataset):
     def __init__(self, args, type="train", demosaic_net=None):
         self.train_size = args.train_size
-        cache_path = os.path.join(args.cache_path, type + "_cache.pkl")
+        cache_path = simulation_cache_path(args, type)
         if not os.path.exists(cache_path):
             self.lrms, self.pan, self.hrms = [], [], []
             base_path = os.path.join(args.data_path, args.dataset, type)
             print("Cache file not found. Generate it from: ", base_path)
-            hrms_imgs = os.listdir(base_path)
 
             if type == "train":
                 numpy.random.seed(42)
             elif type == "test":
                 numpy.random.seed(22)
-            for hrms_name in tqdm.tqdm(hrms_imgs):
-                if args.dataset == "CAVE":
-                    hrms = scio.loadmat(os.path.join(base_path, hrms_name))["b"]
-                    hrms = hrms[:, :, 12:28]
-                elif args.dataset == "chikusei":
-                    hrms = scio.loadmat(os.path.join(base_path, hrms_name))["chikusei"]
-                elif args.dataset == "ICVL":
-                    with h5py.File(os.path.join(base_path, hrms_name), "r") as source:
-                        hrms = source["rad"][:]
-                    hrms = numpy.rot90(hrms.transpose(2, 1, 0))
-                    hrms = hrms / hrms.max((0, 1))
-                    hrms = hrms[:, :, 12:28]
-                hrms = hrms[:hrms.shape[0]//(args.msfa_size*args.spatial_ratio)*(args.msfa_size*args.spatial_ratio),
-                                        :hrms.shape[1]//(args.msfa_size*args.spatial_ratio)*(args.msfa_size*args.spatial_ratio)].astype(numpy.float32)
-
+            for hrms_name, hrms, lrms, mosaic, pan in tqdm.tqdm(simulate_observations(args, type)):
+                mosaic_noise = mosaic
+                pan_noise = pan
                 MSFA = numpy.array([[0, 1, 2, 3],
                                     [4, 5, 6, 7],
                                     [8, 9, 10, 11],
                                     [12, 13, 14, 15]])
-                # MS simulate
-                # downsampling
-                ms_tensor = torch.from_numpy(hrms).permute(2, 0, 1).unsqueeze(0)
-                lrms_tensor = torch.nn.functional.avg_pool2d(ms_tensor, 2, 2)
-                lrms = lrms_tensor[0].permute(1, 2, 0).numpy()
-
-                # mosaicing
-                mosaic = utils.MSFA_filter(lrms, MSFA)
-
-                # adding noise, numpy.random.seed(42)
-                std = numpy.random.uniform(args.noise_level[0], args.noise_level[1])
-                mosaic_noise = mosaic + numpy.random.normal(size=mosaic.shape) * std
-                mosaic_noise = numpy.clip(mosaic_noise, a_min=0, a_max=1.0)
 
                 mosaic_tensor = torch.from_numpy(mosaic_noise.astype(numpy.float32)).permute(2, 0, 1).unsqueeze(0).to(f"cuda:{args.device}")
                 with torch.no_grad():
@@ -227,15 +167,6 @@ class MakeSimulateDatasetforPansharpening(Dataset):
                             mosaic_up[:, i*MSFA.shape[1]+j, i::MSFA.shape[0], j::MSFA.shape[1]] = mosaic_tensor[:, 0, i::MSFA.shape[0], j::MSFA.shape[1]]
                     demosaic = demosaic_net([mosaic_up, mosaic_tensor], scale_coord_map).detach()
                 demosaic = demosaic[0].cpu().permute(1, 2, 0).numpy()
-                
-                # PAN simulate
-                spe_res = numpy.array([1., 1, 2, 4, 8, 9, 10, 12, 16, 12, 10, 9, 7, 3, 2, 1])
-                spe_res /= spe_res.sum()
-                pan = numpy.sum(hrms * spe_res, axis=-1, keepdims=True)
-                # adding noise, set numpy.random.seed(42)
-                std = numpy.random.uniform(args.noise_level[0], args.noise_level[1])
-                pan_noise = pan + numpy.random.normal(size=pan.shape) * std
-                pan_noise = numpy.clip(pan_noise, a_min=0, a_max=1.0)
 
                 spatial_ratio = pan_noise.shape[0] // demosaic.shape[0]
                 if type == "train":
