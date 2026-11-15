@@ -90,6 +90,59 @@ def select_models(names):
     return list(dict.fromkeys(names))
 
 
+def run_directory(output_root, model, run_id=0):
+    directory = output_root / model
+    if run_id:
+        directory = directory / str(run_id)
+    return directory
+
+
+def numbered_run(directory):
+    return (
+        (directory / ".run.json").is_file()
+        or (directory / "1" / "model").is_dir()
+        or (directory / "2" / "model").is_dir()
+    )
+
+
+def allocate_run_id(output_root, model, *, reserve=True):
+    directory = output_root / model
+    numbers = []
+    if directory.is_dir():
+        numbers = [int(path.name) for path in directory.iterdir() if path.is_dir() and path.name.isdecimal()]
+    run_id = max(numbers, default=0) + 1
+    if not reserve:
+        return run_id
+    directory.mkdir(parents=True, exist_ok=True)
+    while True:
+        experiment = run_directory(output_root, model, run_id)
+        try:
+            experiment.mkdir()
+        except FileExistsError:
+            run_id += 1
+            continue
+        (experiment / ".run.json").write_text(json.dumps({"model": model, "run_id": run_id}) + "\n")
+        return run_id
+
+
+def resolve_run_id(output_root, model, run_id=None):
+    if run_id is not None:
+        directory = run_directory(output_root, model, run_id)
+        if not directory.is_dir():
+            raise ValueError(f"Experiment directory missing: {directory}")
+        if run_id and not numbered_run(directory):
+            raise ValueError(f"{directory} is a legacy stage directory. Use --run-id 0 for the legacy experiment.")
+        return run_id
+    directory = output_root / model
+    if not directory.is_dir():
+        raise ValueError(f"Model output directory missing: {directory}")
+    numbers = [
+        int(path.name) for path in directory.iterdir()
+        if path.is_dir() and path.name.isdecimal() and numbered_run(path)
+    ]
+    return max(numbers, default=0)
+
+
 def best_checkpoint(work_directory, stage):
     index = 1 if stage == "demosaic" else 2
     directory = work_directory / str(index) / "model"

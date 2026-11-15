@@ -16,10 +16,13 @@ from experiment import (
     DEFAULT_OUTPUT_ROOT,
     MODELS,
     ROOT,
+    allocate_run_id,
     best_checkpoint,
     check_dataset,
     load_official_entry,
     needs_demosaic_training,
+    resolve_run_id,
+    run_directory,
     run_logged,
     select_models,
     training_script,
@@ -167,7 +170,7 @@ def train_worker(args):
     from test import EvaluationRecorder
 
     name = args.models[0]
-    work_directory = args.output_root / name
+    work_directory = run_directory(args.output_root, name, args.run_id)
     work_directory.mkdir(parents=True, exist_ok=True)
     os.chdir(work_directory)
 
@@ -219,7 +222,7 @@ def train_worker(args):
     entry.main(official_args)
 
 
-def worker_command(args, name, stage):
+def worker_command(args, name, stage, run_id=0):
     return [
         sys.executable, "-u", str(ROOT / "train.py"),
         "--worker", "--models", name, "--stage", stage,
@@ -234,10 +237,11 @@ def worker_command(args, name, stage):
         "--stride", str(args.stride),
         "--num-workers", str(args.num_workers),
         "--patch-size", str(args.patch_size),
+        "--run-id", str(run_id),
     ]
 
 
-def test_command(args, name):
+def test_command(args, name, run_id=0):
     return [
         sys.executable, "-u", str(ROOT / "test.py"),
         "--models", name, "--stage", "all",
@@ -245,6 +249,7 @@ def test_command(args, name):
         "--output-root", str(args.output_root),
         "--device", args.device,
         "--patch-size", str(args.patch_size),
+        "--run-id", str(run_id),
     ]
 
 
@@ -254,6 +259,7 @@ def main():
     parser.add_argument("--stage", choices=["all", "demosaic", "fusion"], default="all")
     parser.add_argument("--data-root", type=Path, default=DEFAULT_DATA_ROOT)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument("--run-id", type=int, help="Existing experiment number for staged training, 0 selects legacy outputs.")
     parser.add_argument("--device", default="0")
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--steps-per-epoch", type=int, default=1000)
@@ -284,11 +290,14 @@ def main():
         parser.error("Learning rate must be positive and worker count must be nonnegative.")
     if args.patch_size < 2:
         parser.error("Metric patch size must be at least 2.")
+    if args.run_id is not None and args.run_id < 0:
+        parser.error("Experiment number must be nonnegative.")
     try:
         names = select_models(args.models)
         if args.worker:
             if len(names) != 1 or args.stage == "all":
                 parser.error("A worker requires one model and one training stage.")
+            args.run_id = args.run_id or 0
             train_worker(args)
             return
         if not args.dry_run:
@@ -301,10 +310,29 @@ def main():
         stages = ["demosaic", "fusion"] if needs_demosaic_training(name) else ["fusion"]
         if args.stage != "all":
             stages = [stage for stage in stages if stage == args.stage]
-        work_directory = args.output_root / name
+        if not stages:
+            continue
+        try:
+            if args.dry_run and args.run_id is not None:
+                run_id = args.run_id
+            elif args.run_id is not None:
+                run_id = resolve_run_id(args.output_root, name, args.run_id)
+            elif args.stage == "fusion" and needs_demosaic_training(name):
+                if args.dry_run and not (args.output_root / name).is_dir():
+                    run_id = allocate_run_id(args.output_root, name, reserve=False)
+                else:
+                    run_id = resolve_run_id(args.output_root, name)
+            else:
+                run_id = allocate_run_id(args.output_root, name, reserve=not args.dry_run)
+        except ValueError as error:
+            print(str(error), file=sys.stderr)
+            failures.append(name)
+            continue
+        work_directory = run_directory(args.output_root, name, run_id)
+        print(f"Model {name}, experiment {run_id}, output {work_directory}", flush=True)
         fusion_completed = False
         for stage in stages:
-            command = worker_command(args, name, stage)
+            command = worker_command(args, name, stage, run_id)
             if args.dry_run:
                 print(shlex.join(command))
                 fusion_completed = stage == "fusion"
@@ -312,7 +340,7 @@ def main():
             index = 1 if stage == "demosaic" else 2
             checkpoint_directory = work_directory / str(index) / "model"
             if list(checkpoint_directory.glob("*.pth")):
-                print(f"Existing checkpoints in {checkpoint_directory}. Choose another --output-root.", file=sys.stderr)
+                print(f"Existing checkpoints in {checkpoint_directory}. Start with --stage all for a new experiment number.", file=sys.stderr)
                 failures.append(f"{name}/{stage}")
                 break
             code = run_logged(
@@ -327,7 +355,7 @@ def main():
                 break
             fusion_completed = stage == "fusion"
         if fusion_completed and not args.train_only:
-            command = test_command(args, name)
+            command = test_command(args, name, run_id)
             if args.dry_run:
                 print(shlex.join(command))
             elif subprocess.run(command, check=False).returncode:

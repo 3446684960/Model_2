@@ -108,6 +108,15 @@ python train.py --models all --data-root "$HOME/autodl-pub/Masico" --device 0
 DATA_ROOT="$HOME/autodl-pub/Masico" GPU=0 bash run_realworld.sh all all
 ```
 
+指定一个模型即可开始新实验。每次完整训练自动取该模型目录下的最大数字加 1，训练和自动测试共用本次编号。
+
+```bash
+bash run_realworld.sh EFN all
+bash run_realworld.sh UVPL all
+```
+
+EFN 的不同实验分别保存在 `runs/real_world/EFN/1`、`EFN/2` 等目录。每个模型独立递增编号。
+
 以上命令在前台实时显示训练进度。进度条包含模型、阶段、Epoch、批次进度、本轮平均 loss 和当前学习率。loss 取自主优化器更新时使用的损失，PanGAN 对应生成器损失。日志文件按轮记录时间、模型名称、轮次和学习率。记录时间使用 UTC+8，异常信息也会写入日志。
 
 根目录入口负责显示和日志记录。保留的官方模型源文件仍可通过来源清单中的 SHA256 核对。显示更新在同步后的新进程中生效。
@@ -125,6 +134,12 @@ python train.py --models LSAN_plus_VBPN --device 0
 python test.py --models LSAN_plus_VBPN --device 0
 ```
 
+独立生成和测试默认使用该模型最近的编号。选择某次已有实验时使用 `--run-id`。
+
+```bash
+python test.py --models EFN --run-id 2 --device 0
+```
+
 分阶段训练和测试时使用以下入口。
 
 ```bash
@@ -134,7 +149,7 @@ python test.py --models all --stage generate --device 0
 python test.py --models all --stage evaluate --device 0
 ```
 
-`--train-only` 仅执行所选训练阶段。脚本 `run_realworld.sh <模型名> train` 使用此模式，`all` 模式执行每个模型的训练和自动测试。自定义评价分块时，`train.py --patch-size` 的值会同时传给每轮验证和训练后的测试。
+`--train-only` 仅执行所选训练阶段。脚本 `run_realworld.sh <模型名> train` 使用此模式，`all` 模式执行每个模型的训练和自动测试。分阶段执行两阶段模型时，去马赛克阶段创建新编号，后续融合阶段默认接续最近编号，也可以通过 `--run-id` 选择已有编号。自定义评价分块时，`train.py --patch-size` 的值会同时传给每轮验证和训练后的测试。
 
 查看清单或仅预览调用计划。
 
@@ -146,10 +161,12 @@ python test.py --models all --dry-run
 
 ## 输出与检查
 
-默认输出在根目录 `runs/real_world` 下，每个模型单独保存。
+默认输出在根目录 `runs/real_world` 下，每个模型按实验编号保存。
 
 ```text
-runs/real_world/<模型名>/
+runs/real_world/<模型名>/<实验编号>/
+├── .run.json                   # 实验编号记录
+├── metrics.csv                 # 本次实验的最终指标
 ├── 1/model/best_*.pth           # 独立去马赛克阶段
 ├── 2/model/best_*.pth           # 融合阶段
 ├── train_demosaic.log
@@ -169,10 +186,12 @@ runs/real_world/<模型名>/
     └── fused/
 ```
 
-汇总指标保存为 `runs/real_world/metrics.csv`。推理时自动读取各阶段唯一的 `best_*.pth`。训练入口检查阶段输出中是否已有权重，以避免官方从头训练逻辑混入旧权重。安排新实验时可通过 `--output-root` 指定另一个输出目录，训练与测试使用同一目录。
+所有实验的汇总指标保存为 `runs/real_world/metrics.csv`，其中 `run_id` 标识模型的实验编号。各次实验也在自己的目录中保存 `metrics.csv`。推理时自动读取所选实验各阶段唯一的 `best_*.pth`。
+
+完整训练会自动创建新编号目录。`--output-root` 可用于选择另一处实验根目录。旧版直接存放在模型目录中的结果按编号 0 读取，指定 `--run-id 0` 即可选择它们。已有旧版数字目录也计入最大编号，例如旧的 `EFN/2/model` 存在时，后续新实验从编号 3 开始。
 
 融合阶段每轮训练后，使用 `real_world/test` 中的数据进行验证。逐图 QNR、D_lambda、D_S 写入 `validation_per_image.csv`，本轮平均指标写入 `validation_summary.csv`，终端和 `validation.log` 同时显示结果。训练验证图像按官方读取顺序编号。
 
 根目录 `test.py` 也会在测试过程中逐图输出指标和进度。逐图结果写入 `test_per_image.csv`，该次测试的平均结果写入 `test_summary.csv`，可读记录写入 `test.log`。独立测试用 MAT 文件名标识图像。CSV 和评价日志以时间记录每次评价，支持保留重复测试的历史。
 
-本地完成源码哈希、语法、调用接口和预览检查。真实数据读取、显卡训练和模型推理的验证由同步到服务器后的运行完成。
+训练数据读取、显卡训练和模型推理由同步到服务器后的运行完成。

@@ -13,13 +13,16 @@ from experiment import (
     DEFAULT_OUTPUT_ROOT,
     MODELS,
     ROOT,
+    allocate_run_id,
     best_checkpoint,
     check_dataset,
     load_official_entry,
     log_time,
     model_directory,
     needs_demosaic_training,
+    resolve_run_id,
     results_directory,
+    run_directory,
     run_logged,
     select_models,
 )
@@ -88,7 +91,7 @@ class EvaluationRecorder:
 
 
 def generation_arguments(args, name, planning=False):
-    work_directory = args.output_root / name
+    work_directory = run_directory(args.output_root, name, args.run_id)
     fusion_checkpoint = "<best fusion checkpoint>"
     demosaic_checkpoint = ""
     if not planning:
@@ -122,7 +125,7 @@ def generation_arguments(args, name, planning=False):
 
 def generation_worker(args):
     name = args.models[0]
-    work_directory = args.output_root / name
+    work_directory = run_directory(args.output_root, name, args.run_id)
     work_directory.mkdir(parents=True, exist_ok=True)
     os.chdir(work_directory)
     entry = load_official_entry(model_directory(name) / "generate.py")
@@ -176,12 +179,41 @@ def evaluate_results(directory, device, patch_size, recorder=None):
     return {"images": len(names), **{metric: value / len(names) for metric, value in totals.items()}}
 
 
+def save_metrics_summary(path, rows, selected):
+    import fcntl
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.with_name(f".{path.name}.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        existing = {}
+        if path.is_file():
+            with path.open(newline="", encoding="utf-8") as handle:
+                for row in csv.DictReader(handle):
+                    row.setdefault("run_id", 0)
+                    existing[(row["model"], str(row["run_id"]))] = row
+        for key in selected:
+            existing.pop(key, None)
+        for row in rows:
+            existing[(row["model"], str(row["run_id"]))] = row
+        temporary = path.with_suffix(".csv.tmp")
+        try:
+            with temporary.open("w", newline="", encoding="utf-8") as handle:
+                fields = ["model", "run_id", "images", "QNR", "D_lambda", "D_S"]
+                writer = csv.DictWriter(handle, fieldnames=fields)
+                writer.writeheader()
+                writer.writerows(existing.values())
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--models", nargs="+", choices=["all", *MODELS], default=["all"])
     parser.add_argument("--stage", choices=["all", "generate", "evaluate"], default="all")
     parser.add_argument("--data-root", type=Path, default=DEFAULT_DATA_ROOT)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument("--run-id", type=int, help="Experiment number, defaults to the latest. Use 0 for legacy outputs.")
     parser.add_argument("--device", default="0")
     parser.add_argument("--cpu", action="store_true", help="Evaluate saved results on CPU.")
     parser.add_argument("--patch-size", type=int, default=64)
@@ -192,11 +224,14 @@ def main():
     args.output_root = args.output_root.expanduser().resolve()
     if args.patch_size < 2:
         parser.error("Metric patch size must be at least 2.")
+    if args.run_id is not None and args.run_id < 0:
+        parser.error("Experiment number must be nonnegative.")
     try:
         names = select_models(args.models)
         if args.worker:
             if len(names) != 1 or args.stage != "generate":
                 parser.error("A generation worker requires one model.")
+            args.run_id = args.run_id or 0
             generation_worker(args)
             return
         if args.stage != "evaluate" and not args.dry_run:
@@ -204,19 +239,35 @@ def main():
     except ValueError as error:
         parser.error(str(error))
 
-    rows, failures = [], []
+    rows, failures, selections = [], [], []
     for name in names:
-        work_directory = args.output_root / name
+        try:
+            if args.dry_run and args.run_id is not None:
+                run_id = args.run_id
+            elif args.dry_run and not (args.output_root / name).is_dir():
+                run_id = allocate_run_id(args.output_root, name, reserve=False)
+            else:
+                run_id = resolve_run_id(args.output_root, name, args.run_id)
+        except ValueError as error:
+            print(str(error), file=sys.stderr)
+            failures.append(name)
+            continue
+        model_args = argparse.Namespace(**vars(args))
+        model_args.run_id = run_id
+        work_directory = run_directory(args.output_root, name, run_id)
+        selections.append((name, run_id, work_directory))
+        print(f"Model {name}, experiment {run_id}, output {work_directory}", flush=True)
         if args.stage in ("all", "generate"):
             command = [
                 sys.executable, "-u", str(ROOT / "test.py"),
                 "--worker", "--models", name, "--stage", "generate",
                 "--data-root", str(args.data_root),
                 "--output-root", str(args.output_root), "--device", args.device,
+                "--run-id", str(run_id),
             ]
             if args.dry_run:
                 print(shlex.join(command))
-                print(f"Checkpoint arguments {vars(generation_arguments(args, name, planning=True))}")
+                print(f"Checkpoint arguments {vars(generation_arguments(model_args, name, planning=True))}")
             else:
                 code = run_logged(command, work_directory, work_directory / "generate.log", model=name)
                 if code:
@@ -231,7 +282,7 @@ def main():
                 device = "cpu" if args.cpu else f"cuda:{args.device}"
                 recorder = EvaluationRecorder(work_directory, name, "test")
                 scores = evaluate_results(directory, device, args.patch_size, recorder)
-                rows.append({"model": name, **scores})
+                rows.append({"model": name, "run_id": run_id, **scores})
             except (ValueError, KeyError, RuntimeError, OSError) as error:
                 print(f"Evaluation failed for {name}. {error}", file=sys.stderr)
                 failures.append(name)
@@ -240,23 +291,15 @@ def main():
                     import torch
 
                     torch.cuda.empty_cache()
-    if not args.dry_run and args.stage in ("all", "evaluate"):
+    if not args.dry_run and args.stage in ("all", "evaluate") and selections:
+        for name, run_id, work_directory in selections:
+            selected = [(name, str(run_id))]
+            model_rows = [row for row in rows if row["model"] == name and row["run_id"] == run_id]
+            save_metrics_summary(work_directory / "metrics.csv", model_rows, selected)
+            print(f"Metrics saved in {work_directory / 'metrics.csv'}")
         summary = args.output_root / "metrics.csv"
-        summary.parent.mkdir(parents=True, exist_ok=True)
-        existing = {}
-        if summary.is_file():
-            with summary.open(newline="", encoding="utf-8") as handle:
-                existing = {row["model"]: row for row in csv.DictReader(handle)}
-        for name in names:
-            existing.pop(name, None)
-        for row in rows:
-            existing[row["model"]] = row
-        temporary = summary.with_suffix(".csv.tmp")
-        with temporary.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=["model", "images", "QNR", "D_lambda", "D_S"])
-            writer.writeheader()
-            writer.writerows(existing.values())
-        temporary.replace(summary)
+        selected = [(name, str(run_id)) for name, run_id, _ in selections]
+        save_metrics_summary(summary, rows, selected)
         print(f"Metrics saved in {summary}")
     if failures:
         raise SystemExit("Failed models " + ", ".join(failures))
