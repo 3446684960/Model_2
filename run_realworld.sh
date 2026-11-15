@@ -24,16 +24,20 @@ case "$STAGE" in
 esac
 
 if [[ "$STAGE" == "train" || "$STAGE" == "all" ]]; then
+    train_options=()
+    if [[ "$STAGE" == "train" ]]; then
+        train_options+=(--train-only)
+    fi
     "$PYTHON_BIN" -u "${PROJECT_DIR}/train.py" \
         --models "$MODEL" --data-root "$DATA_ROOT" \
-        --output-root "$OUTPUT_ROOT" --device "$GPU"
+        --output-root "$OUTPUT_ROOT" --device "$GPU" "${train_options[@]}"
 fi
-if [[ "$STAGE" == "generate" || "$STAGE" == "all" ]]; then
+if [[ "$STAGE" == "generate" ]]; then
     "$PYTHON_BIN" -u "${PROJECT_DIR}/test.py" \
         --models "$MODEL" --stage generate --data-root "$DATA_ROOT" \
         --output-root "$OUTPUT_ROOT" --device "$GPU"
 fi
-if [[ "$STAGE" == "test" || "$STAGE" == "all" ]]; then
+if [[ "$STAGE" == "test" ]]; then
     "$PYTHON_BIN" -u "${PROJECT_DIR}/test.py" \
         --models "$MODEL" --stage evaluate \
         --output-root "$OUTPUT_ROOT" --device "$GPU"

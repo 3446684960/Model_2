@@ -6,6 +6,7 @@ import inspect
 import os
 from pathlib import Path
 import shlex
+import subprocess
 import sys
 import types
 
@@ -59,6 +60,8 @@ class TrainingDisplay:
         self.frame = None
         self.bar = None
         self.optimizer = None
+        self.loss_sum = 0.0
+        self.loss_count = 0
 
     def progress(self, iterable, *args, **kwargs):
         from tqdm import tqdm
@@ -129,8 +132,8 @@ class TrainingDisplay:
         entry.tqdm = types.SimpleNamespace(tqdm=self.progress)
 
 
-def training_metrics(name, on_validation=None):
-    """Use UVPL validation settings and explicitly convert raw 12-bit inputs."""
+def training_metrics(name, on_validation=None, patch_size=64):
+    """Use the same 12-bit input scale and metric settings as final testing."""
     import quality_index as uvpl_metrics
 
     module = types.ModuleType("quality_index")
@@ -141,20 +144,15 @@ def training_metrics(name, on_validation=None):
     raw_input_models = {"EBVIF", "SpNet_plus_PanGAN", "SpNet_plus_VBPN"}
 
     def calc_qnr_mosaic(hrms, mosaic, pan, msfa_kernel, **official_settings):
-        # These three official trainers pass all inputs in 12-bit integer units.
-        if name in raw_input_models:
-            hrms, mosaic, pan = hrms / 4096, mosaic / 4096, pan / 4096
-        scores = uvpl_metrics.calc_qnr_mosaic(
+        # The other official trainers pass normalized evaluation tensors.
+        if name not in raw_input_models:
+            hrms, mosaic, pan = hrms * 4096, mosaic * 4096, pan * 4096
+        scores = uvpl_metrics.calc_qnr_test(
             hrms,
             mosaic,
             pan,
             msfa_kernel,
-            patch_size=128,
-            scale_factor=2,
-            p=0.3,
-            q=1,
-            alpha=0.8,
-            beta=1.2,
+            patch_size=patch_size,
         )
         if on_validation is not None:
             on_validation(scores)
@@ -178,7 +176,7 @@ def train_worker(args):
     if args.stage == "fusion":
         recorder = EvaluationRecorder(work_directory / "2" / "record", name, "validation")
     display = TrainingDisplay(name, args.stage, args.epochs, recorder)
-    sys.modules["quality_index"] = training_metrics(name, display.record_validation)
+    sys.modules["quality_index"] = training_metrics(name, display.record_validation, args.patch_size)
     entry = load_official_entry(training_script(name, args.stage))
     display.install(entry)
 
@@ -235,6 +233,18 @@ def worker_command(args, name, stage):
         "--train-size", str(args.train_size),
         "--stride", str(args.stride),
         "--num-workers", str(args.num_workers),
+        "--patch-size", str(args.patch_size),
+    ]
+
+
+def test_command(args, name):
+    return [
+        sys.executable, "-u", str(ROOT / "test.py"),
+        "--models", name, "--stage", "all",
+        "--data-root", str(args.data_root),
+        "--output-root", str(args.output_root),
+        "--device", args.device,
+        "--patch-size", str(args.patch_size),
     ]
 
 
@@ -252,6 +262,8 @@ def main():
     parser.add_argument("--train-size", type=int, default=64)
     parser.add_argument("--stride", type=int, default=64)
     parser.add_argument("--num-workers", type=int, default=1)
+    parser.add_argument("--patch-size", type=int, default=64)
+    parser.add_argument("--train-only", action="store_true", help="Complete training stages only.")
     parser.add_argument("--list-models", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
@@ -270,6 +282,8 @@ def main():
         parser.error("Training patch size and stride must be multiples of 8 for the filter array.")
     if args.lr <= 0 or args.num_workers < 0:
         parser.error("Learning rate must be positive and worker count must be nonnegative.")
+    if args.patch_size < 2:
+        parser.error("Metric patch size must be at least 2.")
     try:
         names = select_models(args.models)
         if args.worker:
@@ -288,10 +302,12 @@ def main():
         if args.stage != "all":
             stages = [stage for stage in stages if stage == args.stage]
         work_directory = args.output_root / name
+        fusion_completed = False
         for stage in stages:
             command = worker_command(args, name, stage)
             if args.dry_run:
                 print(shlex.join(command))
+                fusion_completed = stage == "fusion"
                 continue
             index = 1 if stage == "demosaic" else 2
             checkpoint_directory = work_directory / str(index) / "model"
@@ -309,8 +325,15 @@ def main():
             if code:
                 failures.append(f"{name}/{stage}")
                 break
+            fusion_completed = stage == "fusion"
+        if fusion_completed and not args.train_only:
+            command = test_command(args, name)
+            if args.dry_run:
+                print(shlex.join(command))
+            elif subprocess.run(command, check=False).returncode:
+                failures.append(f"{name}/test")
     if failures:
-        raise SystemExit("Failed training stages " + ", ".join(failures))
+        raise SystemExit("Failed stages " + ", ".join(failures))
 
 
 if __name__ == "__main__":

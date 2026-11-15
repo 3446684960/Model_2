@@ -162,9 +162,9 @@ def evaluate_results(directory, device, patch_size, recorder=None):
                 tensor = torch.from_numpy(np.asarray(array, dtype=np.float64))
                 tensors[modality] = tensor.permute(2, 0, 1).unsqueeze(0).to(device)
             mosaic = torch.nn.functional.pixel_shuffle(tensors["mosaic"], 4)
-            scores = quality_index.calc_qnr_mosaic(
+            scores = quality_index.calc_qnr_test(
                 tensors["fused"], mosaic, tensors["pan"], msfa_kernel,
-                patch_size=patch_size, scale_factor=2, p=1, q=1, alpha=1, beta=1,
+                patch_size=patch_size,
             )
             for metric, score in zip(totals, scores):
                 totals[metric] += score.item()

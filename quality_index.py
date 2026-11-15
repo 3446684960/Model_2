@@ -1,7 +1,7 @@
 """UVPL official metric functions, shared by every root training and test entry.
 
 Source commit ebe708d2ac96a28c00000e304f10b5d766dc7d55, UVPL/quality_index.py.
-Function implementations are preserved verbatim.
+The 12 upstream function implementations are preserved verbatim.
 """
 
 import torch
@@ -195,3 +195,12 @@ def calc_qnr_mosaic(hrms, mosaic, pan, msfa_kernel, patch_size=32, scale_factor=
     qnr_mosaic = torch.pow(1-d_lambda, alpha) * torch.pow(1-d_s, beta)
 
     return qnr_mosaic, d_lambda, d_s
+
+
+def calc_qnr_test(hrms, mosaic, pan, msfa_kernel, patch_size=64):
+    """Apply UVPL's test settings to tensors in stored 12-bit pixel units."""
+    return calc_qnr_mosaic(
+        hrms, mosaic, pan, msfa_kernel,
+        patch_size=patch_size, scale_factor=2,
+        p=1, q=1, alpha=1, beta=1,
+    )

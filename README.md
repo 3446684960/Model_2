@@ -58,16 +58,16 @@ EFN、EBVIF、UVPL 保留原有目录。其余 12 个组合模型直接位于 `c
 
 ## 评价设置
 
-根目录 `quality_index.py` 的 12 个函数直接取自 UVPL 官方实现，函数代码保持一致。
+根目录 `quality_index.py` 的 12 个原始函数取自 UVPL 官方实现。验证与测试共同调用根目录新增的 `calc_qnr_test`，采用 UVPL 最终测试配置。
 
 | 阶段 | patch size | p | q | alpha | beta | 输入数值尺度 |
 | --- | --- | --- | --- | --- | --- | --- |
-| 训练期间验证与融合权重选择 | 128 | 0.3 | 1 | 0.8 | 1.2 | 归一化到约 0–1 |
+| 训练期间验证与融合权重选择 | 64 | 1 | 1 | 1 | 1 | 12 位量化数值 |
 | 最终测试 | 64 | 1 | 1 | 1 | 1 | 官方生成文件的 12 位量化数值 |
 
-两个阶段分别采用 UVPL 对应的官方参数。高斯平滑采用 `7 × 7`、`sigma=2`，作用于重建高光谱和 PAN。训练期间按平均 QNR 选择融合阶段最佳权重。独立去马赛克阶段使用官方训练损失选择最佳权重。
+训练验证与最终测试采用同一套数值尺度、分块大小和指标参数。高斯平滑采用 UVPL 最终测试实现的 `7 × 7`、`sigma=2`，作用于重建高光谱和 PAN。训练期间按这套评价得到的平均 QNR 选择融合阶段最佳权重。独立去马赛克阶段使用官方训练损失选择最佳权重。
 
-EBVIF 及两个 SpNet 与 PanGAN/VBPN 组合的官方训练器传入 12 位数值，统一入口先除以 4096，再使用共同的训练验证指标。其他训练器已传入归一化数据。
+EBVIF 及两个 SpNet 与 PanGAN/VBPN 组合的官方训练器已向指标函数传入 12 位数值。其他训练器传入的归一化评价张量在根目录指标适配器中乘以 4096，得到与最终测试一致的数值尺度。
 
 最终测试逐张计算 QNR、D_lambda、D_S，然后对测试图取算术平均。全体模型采用同一根目录评价函数。
 
@@ -100,10 +100,9 @@ python -c 'import torch, numpy, scipy, h5py, cv2, matplotlib, tqdm; print(torch.
 
 ```bash
 python train.py --models all --data-root "$HOME/autodl-pub/Masico" --device 0
-python test.py --models all --data-root "$HOME/autodl-pub/Masico" --device 0
 ```
 
-第二条命令依次生成各模型结果并计算共同指标。也可以使用根目录脚本一次执行全流程。
+每个模型完成训练后，立即加载它的最佳权重、生成重建结果并计算最终测试指标，然后处理下一个模型。也可以使用根目录脚本执行这个全流程。
 
 ```bash
 DATA_ROOT="$HOME/autodl-pub/Masico" GPU=0 bash run_realworld.sh all all
@@ -118,17 +117,24 @@ DATA_ROOT="$HOME/autodl-pub/Masico" GPU=0 bash run_realworld.sh all all
 ```bash
 python train.py --models EFN EBVIF UVPL --device 0
 python train.py --models LSAN_plus_VBPN --device 0
+```
+
+独立测试已有权重时执行以下命令。
+
+```bash
 python test.py --models LSAN_plus_VBPN --device 0
 ```
 
-分阶段执行时使用以下入口。
+分阶段训练和测试时使用以下入口。
 
 ```bash
-python train.py --models LSAN_plus_VBPN --stage demosaic --device 0
-python train.py --models LSAN_plus_VBPN --stage fusion --device 0
+python train.py --models LSAN_plus_VBPN --stage demosaic --train-only --device 0
+python train.py --models LSAN_plus_VBPN --stage fusion --train-only --device 0
 python test.py --models all --stage generate --device 0
 python test.py --models all --stage evaluate --device 0
 ```
+
+`--train-only` 仅执行所选训练阶段。脚本 `run_realworld.sh <模型名> train` 使用此模式，`all` 模式执行每个模型的训练和自动测试。自定义评价分块时，`train.py --patch-size` 的值会同时传给每轮验证和训练后的测试。
 
 查看清单或仅预览调用计划。
 
