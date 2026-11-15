@@ -55,6 +55,12 @@ def main(args):
                 hrms = hrms[:, :, 12:28]
             elif args.dataset == "chikusei":
                 hrms = scio.loadmat(data_dir)["chikusei"]
+            elif args.dataset == "ICVL":
+                with h5py.File(data_dir, "r") as source:
+                    hrms = source["rad"][:]
+                hrms = numpy.rot90(hrms.transpose(2, 1, 0))
+                hrms = hrms / hrms.max((0, 1))
+                hrms = hrms[:, :, 12:28]
             hrms = hrms[:hrms.shape[0]//(args.msfa_size*args.spatial_ratio)*(args.msfa_size*args.spatial_ratio),
                         :hrms.shape[1]//(args.msfa_size*args.spatial_ratio)*(args.msfa_size*args.spatial_ratio)].astype(numpy.float32)
 

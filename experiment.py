@@ -15,6 +15,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parent
 DATASET = "real_world"
+DATASETS = ("CAVE", "ICVL", "real_world")
 DEFAULT_DATA_ROOT = Path.home() / "autodl-pub" / "Masico"
 DEFAULT_OUTPUT_ROOT = ROOT / "runs" / DATASET
 MANIFEST = json.loads((ROOT / "compare" / "official_sources.json").read_text())
@@ -75,10 +76,11 @@ def needs_demosaic_training(name):
     return (model_directory(name) / "train_demosaic_realworld.py").is_file()
 
 
-def training_script(name, stage):
+def training_script(name, stage, dataset=DATASET):
+    suffix = "realworld" if dataset == "real_world" else "simulate"
     if stage == "demosaic":
-        return model_directory(name) / "train_demosaic_realworld.py"
-    filename = "train_realworld.py" if name in PRIMARY_MODELS else "train_pansharpening_realworld.py"
+        return model_directory(name) / f"train_demosaic_{suffix}.py"
+    filename = f"train_{suffix}.py" if name in PRIMARY_MODELS else f"train_pansharpening_{suffix}.py"
     return model_directory(name) / filename
 
 
@@ -152,16 +154,47 @@ def best_checkpoint(work_directory, stage):
     return checkpoints[0]
 
 
-def results_directory(work_directory):
-    return work_directory / DATASET / "1" / "result" / "mat"
+def results_directory(work_directory, dataset=DATASET):
+    return work_directory / dataset / "1" / "result" / "mat"
 
 
-def check_dataset(data_root):
+def check_dataset(data_root, dataset=DATASET):
     for split in ("train", "test"):
-        for modality in ("mosaic", "pan"):
-            directory = data_root / DATASET / split / modality
+        modalities = ("mosaic", "pan") if dataset == "real_world" else ("",)
+        for modality in modalities:
+            directory = data_root / dataset / split / modality
             if not directory.is_dir():
                 raise ValueError(f"Dataset directory missing: {directory}")
+            if dataset != "real_world" and not list(directory.glob("*.mat")):
+                raise ValueError(f"No MAT files in {directory}")
+
+
+def dataset_defaults(dataset):
+    """UVPL CAVE/real-world settings and EBVIF's published ICVL settings."""
+    return {
+        "epochs": 100 if dataset == "CAVE" else 10,
+        "steps_per_epoch": 1000 if dataset == "real_world" else 500,
+        "stride": 32 if dataset == "CAVE" else 64,
+        "noise_level": [0.008, 0.01] if dataset == "ICVL" else [0.01, 0.05],
+    }
+
+
+def dataset_options(args, dataset):
+    """Resolve a separate output tree and defaults for one dataset."""
+    import argparse
+
+    options = argparse.Namespace(**vars(args))
+    options.dataset = dataset
+    if args.output_root is None:
+        options.output_root = ROOT / "runs" / dataset
+    else:
+        options.output_root = args.output_root.expanduser().resolve()
+        if len(args.datasets) > 1 or args.datasets == ["all"]:
+            options.output_root /= dataset
+    for key, value in dataset_defaults(dataset).items():
+        if hasattr(options, key) and getattr(options, key) is None:
+            setattr(options, key, value)
+    return options
 
 
 def load_official_entry(script):

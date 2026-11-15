@@ -7,6 +7,19 @@ The 12 upstream function implementations are preserved verbatim.
 import torch
 
 
+def calc_reference_test(hrms, fused):
+    """Use UVPL's float32 CPU final-test metrics for reference datasets."""
+    hrms = hrms.detach().to(device="cpu", dtype=torch.float32)
+    fused = fused.detach().to(device="cpu", dtype=torch.float32)
+    return (
+        calc_psnr(hrms, fused),
+        calc_ssim(hrms, fused),
+        calc_sam(hrms, fused),
+        calc_ergas(hrms, fused),
+        calc_q2n(hrms, fused),
+    )
+
+
 def calc_psnr(hrms, fused):
     mse = torch.mean((hrms - fused) ** 2, [0,2,3])
     psnr = 10*torch.mean(torch.log10(1 / mse))

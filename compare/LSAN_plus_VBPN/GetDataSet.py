@@ -90,6 +90,12 @@ class MakeSimulateDatasetforDemosaic(Dataset):
                     hrms = hrms[:, :, 12:28]
                 elif args.dataset == "chikusei":
                     hrms = scio.loadmat(os.path.join(base_path, hrms_name))["chikusei"]
+                elif args.dataset == "ICVL":
+                    with h5py.File(os.path.join(base_path, hrms_name), "r") as source:
+                        hrms = source["rad"][:]
+                    hrms = numpy.rot90(hrms.transpose(2, 1, 0))
+                    hrms = hrms / hrms.max((0, 1))
+                    hrms = hrms[:, :, 12:28]
                 hrms = hrms[:hrms.shape[0]//(args.msfa_size*args.spatial_ratio)*(args.msfa_size*args.spatial_ratio),
                                         :hrms.shape[1]//(args.msfa_size*args.spatial_ratio)*(args.msfa_size*args.spatial_ratio)].astype(numpy.float32)
 
@@ -232,6 +238,12 @@ class MakeSimulateDatasetforPansharpening(Dataset):
                     hrms = hrms[:, :, 12:28]
                 elif args.dataset == "chikusei":
                     hrms = scio.loadmat(os.path.join(base_path, hrms_name))["chikusei"]
+                elif args.dataset == "ICVL":
+                    with h5py.File(os.path.join(base_path, hrms_name), "r") as source:
+                        hrms = source["rad"][:]
+                    hrms = numpy.rot90(hrms.transpose(2, 1, 0))
+                    hrms = hrms / hrms.max((0, 1))
+                    hrms = hrms[:, :, 12:28]
                 hrms = hrms[:hrms.shape[0]//(args.msfa_size*args.spatial_ratio)*(args.msfa_size*args.spatial_ratio),
                                         :hrms.shape[1]//(args.msfa_size*args.spatial_ratio)*(args.msfa_size*args.spatial_ratio)].astype(numpy.float32)
 

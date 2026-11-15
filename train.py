@@ -1,4 +1,4 @@
-"""Train the retained official models with the UVPL real-world protocol."""
+"""Train the retained official models on CAVE, ICVL and real_world."""
 
 import argparse
 from functools import wraps
@@ -12,13 +12,14 @@ import types
 
 from experiment import (
     DATASET,
+    DATASETS,
     DEFAULT_DATA_ROOT,
-    DEFAULT_OUTPUT_ROOT,
     MODELS,
     ROOT,
     allocate_run_id,
     best_checkpoint,
     check_dataset,
+    dataset_options,
     load_official_entry,
     needs_demosaic_training,
     resolve_run_id,
@@ -32,16 +33,23 @@ from experiment import (
 class EpochBatches:
     """Yield the same number of training batches per epoch for every model."""
 
-    def __init__(self, loader, steps):
+    def __init__(self, loader, steps, display=None, repeat=True):
         if len(loader) == 0:
             raise ValueError("The training dataset has no batches.")
         self.loader = loader
-        self.steps = steps
+        self.steps = steps if repeat else min(steps, len(loader))
+        self.display = display
 
     def __len__(self):
         return self.steps
 
     def __iter__(self):
+        batches = self.iter_batches()
+        if self.display is not None:
+            return self.display.progress(batches, total=self.steps, training_frame=sys._getframe(1))
+        return batches
+
+    def iter_batches(self):
         iterator = iter(self.loader)
         for _ in range(self.steps):
             try:
@@ -66,12 +74,14 @@ class TrainingDisplay:
         self.loss_sum = 0.0
         self.loss_count = 0
 
-    def progress(self, iterable, *args, **kwargs):
+    def progress(self, iterable, *args, training_frame=None, **kwargs):
         from tqdm import tqdm
 
-        if not isinstance(iterable, EpochBatches):
+        if isinstance(iterable, EpochBatches):
+            return iterable
+        if training_frame is None:
             return tqdm(iterable, *args, **kwargs)
-        self.frame = sys._getframe(1)
+        self.frame = training_frame
         epoch = self.frame.f_locals["epoch"]
         self.loss_sum = 0.0
         self.loss_count = 0
@@ -135,8 +145,8 @@ class TrainingDisplay:
         entry.tqdm = types.SimpleNamespace(tqdm=self.progress)
 
 
-def training_metrics(name, on_validation=None, patch_size=64):
-    """Use the same 12-bit input scale and metric settings as final testing."""
+def training_metrics(name, on_validation=None, patch_size=64, dataset=DATASET):
+    """Supply the final-test metrics to each official validation loop."""
     import quality_index as uvpl_metrics
 
     module = types.ModuleType("quality_index")
@@ -162,6 +172,14 @@ def training_metrics(name, on_validation=None, patch_size=64):
         return scores
 
     module.calc_qnr_mosaic = calc_qnr_mosaic
+    if dataset != "real_world":
+        def calc_psnr(hrms, fused):
+            scores = uvpl_metrics.calc_reference_test(hrms, fused)
+            if on_validation is not None:
+                on_validation(scores)
+            return scores[0]
+
+        module.calc_psnr = calc_psnr
     return module
 
 
@@ -174,19 +192,20 @@ def train_worker(args):
     work_directory.mkdir(parents=True, exist_ok=True)
     os.chdir(work_directory)
 
-    # Official files stay intact. Their evaluation dependency is supplied here.
+    # Supply the shared evaluation dependency to the official training entry.
     recorder = None
-    if args.stage == "fusion":
-        recorder = EvaluationRecorder(work_directory / "2" / "record", name, "validation")
+    if args.stage == "fusion" or args.dataset != "real_world":
+        index = 1 if args.stage == "demosaic" else 2
+        recorder = EvaluationRecorder(work_directory / str(index) / "record", name, "validation", args.dataset)
     display = TrainingDisplay(name, args.stage, args.epochs, recorder)
-    sys.modules["quality_index"] = training_metrics(name, display.record_validation, args.patch_size)
-    entry = load_official_entry(training_script(name, args.stage))
+    sys.modules["quality_index"] = training_metrics(name, display.record_validation, args.patch_size, args.dataset)
+    entry = load_official_entry(training_script(name, args.stage, args.dataset))
     display.install(entry)
 
     def data_loader(*loader_args, **loader_kwargs):
         loader = DataLoader(*loader_args, **loader_kwargs)
         if loader_kwargs.get("shuffle", False):
-            return EpochBatches(loader, args.steps_per_epoch)
+            return EpochBatches(loader, args.steps_per_epoch, display, repeat=args.dataset == "real_world")
         return loader
 
     entry.DataLoader = data_loader
@@ -195,7 +214,7 @@ def train_worker(args):
         demosaic_checkpoint = str(best_checkpoint(work_directory, "demosaic"))
     official_args = argparse.Namespace(
         idx=1 if args.stage == "demosaic" else 2,
-        dataset=DATASET,
+        dataset=args.dataset,
         data_path=str(args.data_root),
         train_size=args.train_size,
         stride=args.stride,
@@ -216,6 +235,7 @@ def train_worker(args):
         record=True,
         visual=True,
         visual_freq=1,
+        noise_level=args.noise_level,
     )
     print(f"Model {name}, stage {args.stage}", flush=True)
     print(f"Unified training arguments {vars(official_args)}", flush=True)
@@ -226,6 +246,7 @@ def worker_command(args, name, stage, run_id=0):
     return [
         sys.executable, "-u", str(ROOT / "train.py"),
         "--worker", "--models", name, "--stage", stage,
+        "--datasets", args.dataset,
         "--data-root", str(args.data_root),
         "--output-root", str(args.output_root),
         "--device", args.device,
@@ -238,6 +259,7 @@ def worker_command(args, name, stage, run_id=0):
         "--num-workers", str(args.num_workers),
         "--patch-size", str(args.patch_size),
         "--run-id", str(run_id),
+        "--noise-level", *map(str, args.noise_level),
     ]
 
 
@@ -245,28 +267,32 @@ def test_command(args, name, run_id=0):
     return [
         sys.executable, "-u", str(ROOT / "test.py"),
         "--models", name, "--stage", "all",
+        "--datasets", args.dataset,
         "--data-root", str(args.data_root),
         "--output-root", str(args.output_root),
         "--device", args.device,
         "--patch-size", str(args.patch_size),
         "--run-id", str(run_id),
+        "--noise-level", *map(str, args.noise_level),
     ]
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--models", nargs="+", choices=["all", *MODELS], default=["all"])
+    parser.add_argument("--datasets", nargs="+", choices=["all", *DATASETS], default=[DATASET])
     parser.add_argument("--stage", choices=["all", "demosaic", "fusion"], default="all")
     parser.add_argument("--data-root", type=Path, default=DEFAULT_DATA_ROOT)
-    parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument("--output-root", type=Path)
     parser.add_argument("--run-id", type=int, help="Existing experiment number for staged training, 0 selects legacy outputs.")
     parser.add_argument("--device", default="0")
-    parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--steps-per-epoch", type=int, default=1000)
+    parser.add_argument("--epochs", type=int)
+    parser.add_argument("--steps-per-epoch", type=int)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--train-size", type=int, default=64)
-    parser.add_argument("--stride", type=int, default=64)
+    parser.add_argument("--stride", type=int)
+    parser.add_argument("--noise-level", type=float, nargs=2)
     parser.add_argument("--num-workers", type=int, default=1)
     parser.add_argument("--patch-size", type=int, default=64)
     parser.add_argument("--train-only", action="store_true", help="Complete training stages only.")
@@ -275,15 +301,31 @@ def main():
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     args.data_root = args.data_root.expanduser().resolve()
-    args.output_root = args.output_root.expanduser().resolve()
     if args.list_models:
         for name, source in MODELS.items():
             print(f"{name}\t{source['local_directory']}")
         return
+    if "all" in args.datasets and args.datasets != ["all"]:
+        parser.error("Use dataset 'all' by itself.")
+    datasets = DATASETS if args.datasets == ["all"] else list(dict.fromkeys(args.datasets))
+    if args.worker and len(datasets) != 1:
+        parser.error("A worker requires one dataset.")
+    failures = []
+    for dataset in datasets:
+        options = dataset_options(args, dataset)
+        failures.extend(run_training(options, parser))
+    if failures:
+        raise SystemExit("Failed stages " + ", ".join(failures))
+
+
+def run_training(args, parser):
     if min(args.epochs, args.steps_per_epoch, args.batch_size, args.train_size, args.stride) < 1:
         parser.error("Training sizes and iteration counts must be positive.")
-    if args.steps_per_epoch > 1000:
-        parser.error("The official UVPL trainer supports at most 1000 batches per epoch.")
+    maximum_steps = 1000 if args.dataset == "real_world" else 500
+    if args.steps_per_epoch > maximum_steps:
+        parser.error(f"The official UVPL trainer supports at most {maximum_steps} batches per epoch for {args.dataset}.")
+    if not 0 <= args.noise_level[0] <= args.noise_level[1]:
+        parser.error("Noise levels must satisfy 0 <= lower <= upper.")
     if args.train_size % 8 or args.stride % 8:
         parser.error("Training patch size and stride must be multiples of 8 for the filter array.")
     if args.lr <= 0 or args.num_workers < 0:
@@ -299,9 +341,9 @@ def main():
                 parser.error("A worker requires one model and one training stage.")
             args.run_id = args.run_id or 0
             train_worker(args)
-            return
+            return []
         if not args.dry_run:
-            check_dataset(args.data_root)
+            check_dataset(args.data_root, args.dataset)
     except ValueError as error:
         parser.error(str(error))
 
@@ -329,7 +371,7 @@ def main():
             failures.append(name)
             continue
         work_directory = run_directory(args.output_root, name, run_id)
-        print(f"Model {name}, experiment {run_id}, output {work_directory}", flush=True)
+        print(f"Dataset {args.dataset}, model {name}, experiment {run_id}, output {work_directory}", flush=True)
         fusion_completed = False
         for stage in stages:
             command = worker_command(args, name, stage, run_id)
@@ -360,8 +402,7 @@ def main():
                 print(shlex.join(command))
             elif subprocess.run(command, check=False).returncode:
                 failures.append(f"{name}/test")
-    if failures:
-        raise SystemExit("Failed stages " + ", ".join(failures))
+    return [f"{args.dataset}/{failure}" for failure in failures]
 
 
 if __name__ == "__main__":

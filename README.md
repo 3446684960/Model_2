@@ -1,27 +1,29 @@
-# 真实 Mosaic 与 PAN 融合对比实验
+# Mosaic 与 PAN 融合对比实验
 
-统一入口位于仓库根目录，当前使用 `real_world` 数据。模型源码集中在 `compare` 下。
+统一训练与测试入口位于仓库根目录，支持 `CAVE`、`ICVL`、`real_world`。15 个模型的源码集中在 `compare` 下。
 
 ## 论文与统一方案
 
-三篇论文均为 2026 年。UVPL 时间最晚，其 PDF 标注于 2026 年 8 月 30 日接收，Crossref 的 DOI 登记日期为 2026 年 9 月 24 日。共同训练设置与指标实现采用 UVPL 的真实数据方案。训练算法由各模型的官方函数执行。[UVPL 论文](https://doi.org/10.1109/TNNLS.2026.3730458)
+三篇论文均为 2026 年。UVPL 时间最晚，其 PDF 标注于 2026 年 8 月 30 日接收，Crossref 的 DOI 登记日期为 2026 年 9 月 24 日。CAVE 和 real_world 的共同设置采用 UVPL 官方配置。UVPL 未提供 ICVL 配置，ICVL 沿用 EBVIF 官方的读取方式与数据集配置。训练算法由各模型的官方函数执行。[UVPL 论文](https://doi.org/10.1109/TNNLS.2026.3730458)
 
-| 项目 | 统一设置 |
-| --- | --- |
-| 训练轮数 | 每阶段 10 epochs |
-| 每轮训练批数 | 1000 |
-| 每阶段训练步数 | 10,000 |
-| batch size | 16 |
-| 优化器 | Adam |
-| 学习率 | 固定 `1e-4` |
-| weight decay | 0，采用官方 Adam 默认值 |
-| `train_size` | 64 |
-| `stride` | 64 |
-| 保存与可视化 | 每轮一次 |
+| 项目 | CAVE | ICVL | real_world |
+| --- | --- | --- | --- |
+| 每阶段训练轮数 | 100 | 10 | 10 |
+| 每轮训练批数 | 最多 500，遍历结束即停止 | 最多 500，遍历结束即停止 | 1000，不足时重新遍历 |
+| batch size | 16 | 16 | 16 |
+| 优化器 | Adam | Adam | Adam |
+| 学习率 | 固定 `1e-4` | 固定 `1e-4` | 固定 `1e-4` |
+| `train_size` | 64 | 64 | 64 |
+| `stride` | 32 | 64 | 64 |
+| 仿真噪声标准差范围 | 0.01–0.05 | 0.008–0.01 | 使用实测输入 |
 
-对于融合阶段，`train_size=64` 对应 PAN 的 `64 × 64` 图块，以及 Mosaic 的 `32 × 32` 图块。独立去马赛克阶段按其官方数据读取器裁剪 `64 × 64` 的 Mosaic。
+CAVE 的每轮批数沿用 UVPL 官方循环的上限规则，实际批数取决于读取器产生的图块数量。例如 4500 个图块、batch size 16 对应每轮 282 批。ICVL 使用同样的循环规则。real_world 延续每轮 1000 批的统一设置。EBVIF 仿真训练循环的提前退出条件改为统一批数上限，避免在数据遍历结束前额外跳过最后一批。
 
-统一训练入口在每轮提供 1000 批数据。数据不足时重新遍历训练集，重新遍历沿用官方 DataLoader 的打乱方式。LSAN、SFNet、SpNet 的组合先训练去马赛克阶段，再训练融合阶段，每个阶段分别执行 10,000 步。PPID 采用官方确定性去马赛克方法，随后训练融合阶段。
+融合阶段的 `train_size=64` 对应 PAN 的 `64 × 64` 图块，以及 Mosaic 的 `32 × 32` 图块。独立去马赛克阶段沿用各模型官方的训练样本构造。LSAN、SFNet、SpNet 的组合先训练去马赛克阶段，再训练融合阶段。PPID 采用官方确定性去马赛克方法，随后训练融合阶段。
+
+`noise_level` 传入支持噪声的官方读取器。EFN/WFANet 的官方仿真不加噪声，EBVIF/部分 SpNet 读取器包含额外模糊。当前接入保留这些官方预处理差异，统一仿真方式需另行确认。
+
+同一数据集下，各模型使用上表的共同训练参数。可通过 `--epochs`、`--steps-per-epoch`、`--stride`、`--noise-level` 覆盖对应设置。
 
 ## 目录
 
@@ -54,9 +56,11 @@ Model_L_2/
 
 EFN、EBVIF、UVPL 保留原有目录。其余 12 个组合模型直接位于 `compare` 下。重复组合优先保留 UVPL 仓库的版本，其次为 EBVIF、EFN。UVPL 仓库中的 EFN 副本也已去重，采用 EFN 自身官方仓库的模型。
 
-每个保留目录的所有文件及 SHA256、原始路径、来源仓库和提交记录保存在 `compare/official_sources.json`。保留的官方源文件与下载时逐字节一致。统一入口调用官方训练、数据处理和推理函数，并在入口处提供共同训练参数、每轮批数和评价函数。
+来源仓库、原始路径和提交记录保存在 `compare/official_sources.json`。统一入口调用各模型的官方训练和推理函数，并提供共同训练参数、批数规则与评价函数。缺少 ICVL 分支的读取器与生成脚本已补入 EFN/EBVIF 的读取方式。
 
 ## 评价设置
+
+CAVE、ICVL 采用 UVPL 官方最终测试中的 float32 CPU 计算方式，逐张计算 PSNR、SSIM、SAM、ERGAS、Q2n，再对测试图取算术平均。融合阶段每轮验证与最终测试调用同一个 `calc_reference_test`，按平均 PSNR 选择最佳融合权重。独立去马赛克阶段也记录这些指标，评价对象是该阶段官方读取器返回的目标图像。ERGAS 使用 UVPL 测试函数的默认 `scale_factor=4`。
 
 根目录 `quality_index.py` 的 12 个原始函数取自 UVPL 官方实现。验证与测试共同调用根目录新增的 `calc_qnr_test`，采用 UVPL 最终测试配置。
 
@@ -74,6 +78,19 @@ EBVIF 及两个 SpNet 与 PanGAN/VBPN 组合的官方训练器已向指标函数
 ## 数据与环境
 
 默认数据根目录为当前账户的 `~/autodl-pub/Masico`。所述 root 账户对应 `/root/autodl-pub/Masico`。
+
+CAVE 的 MAT 文件读取键 `b`，选取 Python 索引 `12:28` 的 16 个波段。ICVL 的 HDF5 MAT 文件读取键 `rad`，按 EFN/EBVIF 的实现调整维度、旋转、逐波段最大值归一化，然后选取 `12:28`。文件结构如下。
+
+```text
+Masico/
+├── CAVE/
+│   ├── train/*.mat
+│   └── test/*.mat
+├── ICVL/
+│   ├── train/*.mat
+│   └── test/*.mat
+└── real_world/
+```
 
 ```text
 Masico/real_world/
@@ -96,7 +113,23 @@ python -c 'import torch, numpy, scipy, h5py, cv2, matplotlib, tqdm; print(torch.
 
 ## 运行
 
-同步整个仓库后，在仓库根目录执行以下命令。
+同步整个仓库后，在仓库根目录执行以下命令，按 CAVE、ICVL、real_world 的顺序运行全部 15 个模型。每个数据集中的每个模型训练完成后立即生成结果并测试。
+
+```bash
+python -u train.py --datasets all --models all --data-root "$HOME/autodl-pub/Masico" --device 0
+```
+
+分别运行某个数据集，或为已有权重重新生成结果并测试。
+
+```bash
+python -u train.py --datasets CAVE --models all --device 0
+python -u train.py --datasets ICVL --models UVPL --device 0
+python -u test.py --datasets all --models all --device 0
+```
+
+`test.py --stage evaluate` 直接评估已生成的 MAT 文件。独立测试默认选取各数据集、各模型最近的实验编号。训练会为每个数据集分别训练权重。
+
+省略 `--datasets` 时默认运行 real_world，原有命令继续使用。
 
 ```bash
 python train.py --models all --data-root "$HOME/autodl-pub/Masico" --device 0
@@ -119,7 +152,7 @@ EFN 的不同实验分别保存在 `runs/real_world/EFN/1`、`EFN/2` 等目录�
 
 以上命令在前台实时显示训练进度。进度条包含模型、阶段、Epoch、批次进度、本轮平均 loss 和当前学习率。loss 取自主优化器更新时使用的损失，PanGAN 对应生成器损失。日志文件按轮记录时间、模型名称、轮次和学习率。记录时间使用 UTC+8，异常信息也会写入日志。
 
-根目录入口负责显示和日志记录。保留的官方模型源文件仍可通过来源清单中的 SHA256 核对。显示更新在同步后的新进程中生效。
+根目录入口负责显示和日志记录。显示更新在同步后的新进程中生效。
 
 单独训练和评估所选模型。
 
@@ -161,7 +194,11 @@ python test.py --models all --dry-run
 
 ## 输出与检查
 
-默认输出在根目录 `runs/real_world` 下，每个模型按实验编号保存。
+输出按数据集分别保存在 `runs/CAVE`、`runs/ICVL`、`runs/real_world`，每个数据集中的模型独立递增实验编号。每个数据集根目录下的 `metrics.csv` 汇总该数据集所有模型、各次实验的最终指标。每次实验也保存独立的 `metrics.csv`。
+
+单数据集的 `--output-root` 直接指定该数据集的输出根目录。选择多个数据集时，入口会在指定根目录下分别创建各数据集子目录。
+
+下面以 real_world 为例。CAVE、ICVL 使用相同的目录结构，生成结果额外包含 `gt/`。
 
 ```text
 runs/real_world/<模型名>/<实验编号>/
@@ -190,7 +227,7 @@ runs/real_world/<模型名>/<实验编号>/
 
 完整训练会自动创建新编号目录。`--output-root` 可用于选择另一处实验根目录。旧版直接存放在模型目录中的结果按编号 0 读取，指定 `--run-id 0` 即可选择它们。已有旧版数字目录也计入最大编号，例如旧的 `EFN/2/model` 存在时，后续新实验从编号 3 开始。
 
-融合阶段每轮训练后，使用 `real_world/test` 中的数据进行验证。逐图 QNR、D_lambda、D_S 写入 `validation_per_image.csv`，本轮平均指标写入 `validation_summary.csv`，终端和 `validation.log` 同时显示结果。训练验证图像按官方读取顺序编号。
+融合阶段每轮训练后，使用所选数据集的 `test` 中的数据进行验证。CAVE、ICVL 记录 PSNR、SSIM、SAM、ERGAS、Q2n。real_world 的逐图 QNR、D_lambda、D_S 写入 `validation_per_image.csv`，本轮平均指标写入 `validation_summary.csv`，终端和 `validation.log` 同时显示结果。训练验证图像按官方读取顺序编号。
 
 根目录 `test.py` 也会在测试过程中逐图输出指标和进度。逐图结果写入 `test_per_image.csv`，该次测试的平均结果写入 `test_summary.csv`，可读记录写入 `test.log`。独立测试用 MAT 文件名标识图像。CSV 和评价日志以时间记录每次评价，支持保留重复测试的历史。
 

@@ -1,4 +1,4 @@
-"""Generate real-world results and evaluate every model using UVPL metrics."""
+"""Generate and evaluate CAVE, ICVL and real_world using UVPL metrics."""
 
 import argparse
 import csv
@@ -9,13 +9,14 @@ import sys
 
 from experiment import (
     DATASET,
+    DATASETS,
     DEFAULT_DATA_ROOT,
-    DEFAULT_OUTPUT_ROOT,
     MODELS,
     ROOT,
     allocate_run_id,
     best_checkpoint,
     check_dataset,
+    dataset_options,
     load_official_entry,
     log_time,
     model_directory,
@@ -28,20 +29,27 @@ from experiment import (
 )
 
 
+def metric_names(dataset):
+    if dataset == "real_world":
+        return ("QNR", "D_lambda", "D_S")
+    return ("PSNR", "SSIM", "SAM", "ERGAS", "Q2n")
+
+
 class EvaluationRecorder:
     """Save individual and averaged validation or test scores as plain records."""
 
-    def __init__(self, directory, model, stage):
+    def __init__(self, directory, model, stage, dataset=DATASET):
         self.directory = directory
         self.model = model
         self.stage = stage
+        self.dataset = dataset
 
     def start(self, *, epoch=None, learning_rate=None, expected_images=None):
         self.epoch = epoch
         self.learning_rate = learning_rate
         self.expected_images = expected_images
         self.images = 0
-        self.totals = {"QNR": 0.0, "D_lambda": 0.0, "D_S": 0.0}
+        self.totals = dict.fromkeys(metric_names(self.dataset), 0.0)
 
     def append_csv(self, suffix, row):
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -102,14 +110,14 @@ def generation_arguments(args, name, planning=False):
             demosaic_checkpoint = str(best_checkpoint(work_directory, "demosaic"))
     return argparse.Namespace(
         idx=1,
-        real_world=True,
-        simulate=False,
+        real_world=args.dataset == "real_world",
+        simulate=args.dataset != "real_world",
         mosaic_save=True,
         pan_save=True,
         demosaic_save=True,
-        gt_save=False,
+        gt_save=args.dataset != "real_world",
         spatial_ratio=2,
-        dataset=DATASET,
+        dataset=args.dataset,
         num_bands=16,
         msfa_size=4,
         data_path=str(args.data_root),
@@ -119,7 +127,7 @@ def generation_arguments(args, name, planning=False):
         load_model=fusion_checkpoint,
         load_ps_model=fusion_checkpoint,
         load_demosaic_model=demosaic_checkpoint,
-        noise_level=[0.01, 0.05],
+        noise_level=args.noise_level,
     )
 
 
@@ -132,24 +140,26 @@ def generation_worker(args):
     entry.main(generation_arguments(args, name))
 
 
-def evaluate_results(directory, device, patch_size, recorder=None):
+def evaluate_results(directory, device, patch_size, recorder=None, dataset=DATASET):
     import numpy as np
     import scipy.io
     import torch
     import quality_index
     from tqdm import tqdm
 
+    modalities = ("mosaic", "pan", "fused") if dataset == "real_world" else ("gt", "fused")
     file_sets = {
         modality: {file.name for file in (directory / modality).glob("*.mat")}
-        for modality in ("mosaic", "pan", "fused")
+        for modality in modalities
     }
-    if not file_sets["mosaic"] or any(files != file_sets["mosaic"] for files in file_sets.values()):
-        raise ValueError(f"Matching mosaic, pan and fused MAT files are required in {directory}.")
-    names = sorted(file_sets["mosaic"])
+    reference = file_sets[modalities[0]]
+    if not reference or any(files != reference for files in file_sets.values()):
+        raise ValueError(f"Matching {', '.join(modalities)} MAT files are required in {directory}.")
+    names = sorted(reference)
     if recorder is not None:
         recorder.start(expected_images=len(names))
     msfa_kernel = torch.zeros(16, 1, 8, 8, device=device)
-    totals = {"QNR": 0.0, "D_lambda": 0.0, "D_S": 0.0}
+    totals = dict.fromkeys(metric_names(dataset), 0.0)
     loop = tqdm(
         names,
         desc=f"{recorder.model} Test" if recorder is not None else "Test",
@@ -162,24 +172,29 @@ def evaluate_results(directory, device, patch_size, recorder=None):
             tensors = {}
             for modality in file_sets:
                 array = scipy.io.loadmat(directory / modality / name)[modality]
-                tensor = torch.from_numpy(np.asarray(array, dtype=np.float64))
-                tensors[modality] = tensor.permute(2, 0, 1).unsqueeze(0).to(device)
-            mosaic = torch.nn.functional.pixel_shuffle(tensors["mosaic"], 4)
-            scores = quality_index.calc_qnr_test(
-                tensors["fused"], mosaic, tensors["pan"], msfa_kernel,
-                patch_size=patch_size,
-            )
+                dtype = np.float64 if dataset == "real_world" else np.float32
+                tensor = torch.from_numpy(np.asarray(array, dtype=dtype))
+                metric_device = device if dataset == "real_world" else "cpu"
+                tensors[modality] = tensor.permute(2, 0, 1).unsqueeze(0).to(metric_device)
+            if dataset == "real_world":
+                mosaic = torch.nn.functional.pixel_shuffle(tensors["mosaic"], 4)
+                scores = quality_index.calc_qnr_test(
+                    tensors["fused"], mosaic, tensors["pan"], msfa_kernel,
+                    patch_size=patch_size,
+                )
+            else:
+                scores = quality_index.calc_reference_test(tensors["gt"], tensors["fused"])
             for metric, score in zip(totals, scores):
                 totals[metric] += score.item()
             if recorder is not None:
                 recorder.record(name, scores)
-                loop.set_postfix(QNR=f"{scores[0].item():.6f}", refresh=False)
+                loop.set_postfix({next(iter(totals)): f"{scores[0].item():.6f}"}, refresh=False)
     if recorder is not None:
         recorder.finish()
     return {"images": len(names), **{metric: value / len(names) for metric, value in totals.items()}}
 
 
-def save_metrics_summary(path, rows, selected):
+def save_metrics_summary(path, rows, selected, dataset=DATASET):
     import fcntl
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -198,7 +213,7 @@ def save_metrics_summary(path, rows, selected):
         temporary = path.with_suffix(".csv.tmp")
         try:
             with temporary.open("w", newline="", encoding="utf-8") as handle:
-                fields = ["model", "run_id", "images", "QNR", "D_lambda", "D_S"]
+                fields = ["model", "run_id", "images", *metric_names(dataset)]
                 writer = csv.DictWriter(handle, fieldnames=fields)
                 writer.writeheader()
                 writer.writerows(existing.values())
@@ -210,22 +225,39 @@ def save_metrics_summary(path, rows, selected):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--models", nargs="+", choices=["all", *MODELS], default=["all"])
+    parser.add_argument("--datasets", nargs="+", choices=["all", *DATASETS], default=[DATASET])
     parser.add_argument("--stage", choices=["all", "generate", "evaluate"], default="all")
     parser.add_argument("--data-root", type=Path, default=DEFAULT_DATA_ROOT)
-    parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument("--output-root", type=Path)
     parser.add_argument("--run-id", type=int, help="Experiment number, defaults to the latest. Use 0 for legacy outputs.")
     parser.add_argument("--device", default="0")
     parser.add_argument("--cpu", action="store_true", help="Evaluate saved results on CPU.")
     parser.add_argument("--patch-size", type=int, default=64)
+    parser.add_argument("--noise-level", type=float, nargs=2)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     args.data_root = args.data_root.expanduser().resolve()
-    args.output_root = args.output_root.expanduser().resolve()
+    if "all" in args.datasets and args.datasets != ["all"]:
+        parser.error("Use dataset 'all' by itself.")
+    datasets = DATASETS if args.datasets == ["all"] else list(dict.fromkeys(args.datasets))
+    if args.worker and len(datasets) != 1:
+        parser.error("A worker requires one dataset.")
+    failures = []
+    for dataset in datasets:
+        options = dataset_options(args, dataset)
+        failures.extend(run_testing(options, parser))
+    if failures:
+        raise SystemExit("Failed models " + ", ".join(failures))
+
+
+def run_testing(args, parser):
     if args.patch_size < 2:
         parser.error("Metric patch size must be at least 2.")
     if args.run_id is not None and args.run_id < 0:
         parser.error("Experiment number must be nonnegative.")
+    if not 0 <= args.noise_level[0] <= args.noise_level[1]:
+        parser.error("Noise levels must satisfy 0 <= lower <= upper.")
     try:
         names = select_models(args.models)
         if args.worker:
@@ -233,9 +265,9 @@ def main():
                 parser.error("A generation worker requires one model.")
             args.run_id = args.run_id or 0
             generation_worker(args)
-            return
+            return []
         if args.stage != "evaluate" and not args.dry_run:
-            check_dataset(args.data_root)
+            check_dataset(args.data_root, args.dataset)
     except ValueError as error:
         parser.error(str(error))
 
@@ -261,9 +293,11 @@ def main():
             command = [
                 sys.executable, "-u", str(ROOT / "test.py"),
                 "--worker", "--models", name, "--stage", "generate",
+                "--datasets", args.dataset,
                 "--data-root", str(args.data_root),
                 "--output-root", str(args.output_root), "--device", args.device,
                 "--run-id", str(run_id),
+                "--noise-level", *map(str, args.noise_level),
             ]
             if args.dry_run:
                 print(shlex.join(command))
@@ -274,14 +308,14 @@ def main():
                     failures.append(name)
                     continue
         if args.stage in ("all", "evaluate"):
-            directory = results_directory(work_directory)
+            directory = results_directory(work_directory, args.dataset)
             if args.dry_run:
-                print(f"Evaluate {name} from {directory} using UVPL QNR, patch size {args.patch_size}.")
+                print(f"Evaluate {name} from {directory} using UVPL {', '.join(metric_names(args.dataset))}.")
                 continue
             try:
                 device = "cpu" if args.cpu else f"cuda:{args.device}"
-                recorder = EvaluationRecorder(work_directory, name, "test")
-                scores = evaluate_results(directory, device, args.patch_size, recorder)
+                recorder = EvaluationRecorder(work_directory, name, "test", args.dataset)
+                scores = evaluate_results(directory, device, args.patch_size, recorder, args.dataset)
                 rows.append({"model": name, "run_id": run_id, **scores})
             except (ValueError, KeyError, RuntimeError, OSError) as error:
                 print(f"Evaluation failed for {name}. {error}", file=sys.stderr)
@@ -295,14 +329,13 @@ def main():
         for name, run_id, work_directory in selections:
             selected = [(name, str(run_id))]
             model_rows = [row for row in rows if row["model"] == name and row["run_id"] == run_id]
-            save_metrics_summary(work_directory / "metrics.csv", model_rows, selected)
+            save_metrics_summary(work_directory / "metrics.csv", model_rows, selected, args.dataset)
             print(f"Metrics saved in {work_directory / 'metrics.csv'}")
         summary = args.output_root / "metrics.csv"
         selected = [(name, str(run_id)) for name, run_id, _ in selections]
-        save_metrics_summary(summary, rows, selected)
+        save_metrics_summary(summary, rows, selected, args.dataset)
         print(f"Metrics saved in {summary}")
-    if failures:
-        raise SystemExit("Failed models " + ", ".join(failures))
+    return [f"{args.dataset}/{failure}" for failure in failures]
 
 
 if __name__ == "__main__":
