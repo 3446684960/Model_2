@@ -1,6 +1,8 @@
 """Train the retained official models with the UVPL real-world protocol."""
 
 import argparse
+from functools import wraps
+import inspect
 import os
 from pathlib import Path
 import shlex
@@ -46,7 +48,88 @@ class EpochBatches:
             yield batch
 
 
-def training_metrics(name):
+class TrainingDisplay:
+    """Observe the official loop and main optimizer for live display only."""
+
+    def __init__(self, name, stage, epochs, recorder=None):
+        self.name = name
+        self.stage = stage
+        self.epochs = epochs
+        self.recorder = recorder
+        self.frame = None
+        self.bar = None
+        self.optimizer = None
+
+    def progress(self, iterable, *args, **kwargs):
+        from tqdm import tqdm
+
+        if not isinstance(iterable, EpochBatches):
+            return tqdm(iterable, *args, **kwargs)
+        self.frame = sys._getframe(1)
+        epoch = self.frame.f_locals["epoch"]
+        self.loss_sum = 0.0
+        self.loss_count = 0
+        kwargs.update(
+            desc=f"{self.name} {self.stage} Epoch [{epoch}/{self.epochs}]",
+            dynamic_ncols=True,
+            file=sys.stdout,
+        )
+        self.bar = tqdm(iterable, *args, **kwargs)
+        if self.recorder is not None:
+            self.recorder.start(
+                epoch=epoch,
+                learning_rate=self.optimizer.param_groups[0]["lr"],
+                expected_images=self.validation_images,
+            )
+        return self.bar
+
+    def after_step(self, optimizer, step_args, step_kwargs):
+        if self.frame is None or self.bar is None:
+            return
+        loss = self.frame.f_locals.get("loss")
+        if loss is None:
+            return
+        self.loss_sum += loss.detach().item()
+        self.loss_count += 1
+        self.bar.set_postfix(
+            loss=f"{self.loss_sum / self.loss_count:.8f}",
+            lr=f"{optimizer.param_groups[0]['lr']:.8f}",
+            refresh=False,
+        )
+
+    def record_validation(self, scores):
+        if self.recorder is None:
+            return
+        self.recorder.record(f"{self.recorder.images + 1:04d}", scores)
+        if self.recorder.images == self.validation_images:
+            self.recorder.finish()
+
+    def install(self, entry):
+        original_train = entry.train
+
+        @wraps(original_train)
+        def train_with_display(*args, **kwargs):
+            arguments = inspect.signature(original_train).bind(*args, **kwargs).arguments
+            self.optimizer = arguments.get("optimizer")
+            if self.optimizer is None:
+                self.optimizer = arguments["optimizers"][0]
+            self.validation_images = len(arguments["val_dataloader"])
+            hook = self.optimizer.register_step_post_hook(self.after_step)
+            try:
+                return original_train(*args, **kwargs)
+            finally:
+                hook.remove()
+                if self.bar is not None:
+                    self.bar.close()
+                self.frame = None
+                self.bar = None
+                self.optimizer = None
+
+        entry.train = train_with_display
+        entry.tqdm = types.SimpleNamespace(tqdm=self.progress)
+
+
+def training_metrics(name, on_validation=None):
     """Use UVPL validation settings and explicitly convert raw 12-bit inputs."""
     import quality_index as uvpl_metrics
 
@@ -61,7 +144,7 @@ def training_metrics(name):
         # These three official trainers pass all inputs in 12-bit integer units.
         if name in raw_input_models:
             hrms, mosaic, pan = hrms / 4096, mosaic / 4096, pan / 4096
-        return uvpl_metrics.calc_qnr_mosaic(
+        scores = uvpl_metrics.calc_qnr_mosaic(
             hrms,
             mosaic,
             pan,
@@ -73,6 +156,9 @@ def training_metrics(name):
             alpha=0.8,
             beta=1.2,
         )
+        if on_validation is not None:
+            on_validation(scores)
+        return scores
 
     module.calc_qnr_mosaic = calc_qnr_mosaic
     return module
@@ -80,6 +166,7 @@ def training_metrics(name):
 
 def train_worker(args):
     from torch.utils.data import DataLoader
+    from test import EvaluationRecorder
 
     name = args.models[0]
     work_directory = args.output_root / name
@@ -87,8 +174,13 @@ def train_worker(args):
     os.chdir(work_directory)
 
     # Official files stay intact. Their evaluation dependency is supplied here.
-    sys.modules["quality_index"] = training_metrics(name)
+    recorder = None
+    if args.stage == "fusion":
+        recorder = EvaluationRecorder(work_directory / "2" / "record", name, "validation")
+    display = TrainingDisplay(name, args.stage, args.epochs, recorder)
+    sys.modules["quality_index"] = training_metrics(name, display.record_validation)
     entry = load_official_entry(training_script(name, args.stage))
+    display.install(entry)
 
     def data_loader(*loader_args, **loader_kwargs):
         loader = DataLoader(*loader_args, **loader_kwargs)
@@ -207,7 +299,13 @@ def main():
                 print(f"Existing checkpoints in {checkpoint_directory}. Choose another --output-root.", file=sys.stderr)
                 failures.append(f"{name}/{stage}")
                 break
-            code = run_logged(command, work_directory, work_directory / f"train_{stage}.log")
+            code = run_logged(
+                command,
+                work_directory,
+                work_directory / f"train_{stage}.log",
+                model=name,
+                epochs=args.epochs,
+            )
             if code:
                 failures.append(f"{name}/{stage}")
                 break
