@@ -44,7 +44,7 @@ def train(fuse_net: nn.Module, optimizer, train_dataloader, val_dataloader, args
 
         loss_per_epoch = 0
         for cnt, data in enumerate(tqdm.tqdm(train_dataloader)):
-            if cnt == args.iters_per_epoch:
+            if cnt == len(train_dataloader)-1:
                 continue
             mosaic, pan = data[0].to(device), data[1].to(device)
             

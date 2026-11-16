@@ -14,7 +14,7 @@ __pycache__/
 # Runtime logs
 *.log
 
-# Experiment metric CSV files
+# Official training records
 /runs/**
 !/runs/**/
-!/runs/**/*.csv
+!/runs/**/record.json

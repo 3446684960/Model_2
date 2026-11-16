@@ -1,12 +1,8 @@
-"""Train the retained official models on CAVE, ICVL and real_world."""
+"""Call the official training entries with the agreed UVPL settings."""
 
 import argparse
-from functools import wraps
-import inspect
 import os
 from pathlib import Path
-import shlex
-import subprocess
 import sys
 import types
 
@@ -16,40 +12,31 @@ from experiment import (
     DEFAULT_DATA_ROOT,
     MODELS,
     ROOT,
-    allocate_run_id,
     best_checkpoint,
     check_dataset,
     dataset_options,
     load_official_entry,
     needs_demosaic_training,
-    resolve_run_id,
-    run_directory,
-    run_logged,
+    run_command,
     select_models,
+    stage_index,
     training_script,
 )
 
 
 class EpochBatches:
-    """Yield the same number of training batches per epoch for every model."""
+    """Apply the previously agreed common batch budget to the data loader."""
 
-    def __init__(self, loader, steps, display=None, repeat=True):
+    def __init__(self, loader, steps, repeat=True):
         if len(loader) == 0:
             raise ValueError("The training dataset has no batches.")
         self.loader = loader
         self.steps = steps if repeat else min(steps, len(loader))
-        self.display = display
 
     def __len__(self):
         return self.steps
 
     def __iter__(self):
-        batches = self.iter_batches()
-        if self.display is not None:
-            return iter(self.display.progress(batches, total=self.steps, training_frame=sys._getframe(1)))
-        return batches
-
-    def iter_batches(self):
         iterator = iter(self.loader)
         for _ in range(self.steps):
             try:
@@ -60,93 +47,8 @@ class EpochBatches:
             yield batch
 
 
-class TrainingDisplay:
-    """Observe the official loop and main optimizer for live display only."""
-
-    def __init__(self, name, stage, epochs, recorder=None):
-        self.name = name
-        self.stage = stage
-        self.epochs = epochs
-        self.recorder = recorder
-        self.frame = None
-        self.bar = None
-        self.optimizer = None
-        self.loss_sum = 0.0
-        self.loss_count = 0
-
-    def progress(self, iterable, *args, training_frame=None, **kwargs):
-        from tqdm import tqdm
-
-        if isinstance(iterable, EpochBatches):
-            return iterable
-        if training_frame is None:
-            return tqdm(iterable, *args, **kwargs)
-        self.frame = training_frame
-        epoch = self.frame.f_locals["epoch"]
-        self.loss_sum = 0.0
-        self.loss_count = 0
-        kwargs.update(
-            desc=f"{self.name} {self.stage} Epoch [{epoch}/{self.epochs}]",
-            dynamic_ncols=True,
-            file=sys.stdout,
-        )
-        self.bar = tqdm(iterable, *args, **kwargs)
-        if self.recorder is not None:
-            self.recorder.start(
-                epoch=epoch,
-                learning_rate=self.optimizer.param_groups[0]["lr"],
-                expected_images=self.validation_images,
-            )
-        return self.bar
-
-    def after_step(self, optimizer, step_args, step_kwargs):
-        if self.frame is None or self.bar is None:
-            return
-        loss = self.frame.f_locals.get("loss")
-        if loss is None:
-            return
-        self.loss_sum += loss.detach().item()
-        self.loss_count += 1
-        self.bar.set_postfix(
-            loss=f"{self.loss_sum / self.loss_count:.8f}",
-            lr=f"{optimizer.param_groups[0]['lr']:.8f}",
-            refresh=False,
-        )
-
-    def record_validation(self, scores):
-        if self.recorder is None:
-            return
-        self.recorder.record(f"{self.recorder.images + 1:04d}", scores)
-        if self.recorder.images == self.validation_images:
-            self.recorder.finish()
-
-    def install(self, entry):
-        original_train = entry.train
-
-        @wraps(original_train)
-        def train_with_display(*args, **kwargs):
-            arguments = inspect.signature(original_train).bind(*args, **kwargs).arguments
-            self.optimizer = arguments.get("optimizer")
-            if self.optimizer is None:
-                self.optimizer = arguments["optimizers"][0]
-            self.validation_images = len(arguments["val_dataloader"])
-            hook = self.optimizer.register_step_post_hook(self.after_step)
-            try:
-                return original_train(*args, **kwargs)
-            finally:
-                hook.remove()
-                if self.bar is not None:
-                    self.bar.close()
-                self.frame = None
-                self.bar = None
-                self.optimizer = None
-
-        entry.train = train_with_display
-        entry.tqdm = types.SimpleNamespace(tqdm=self.progress)
-
-
-def training_metrics(name, on_validation=None, patch_size=64, dataset=DATASET):
-    """Supply the final-test metrics to each official validation loop."""
+def training_metrics(name, patch_size):
+    """Supply the agreed final-test QNR settings to official validation."""
     import quality_index as uvpl_metrics
 
     module = types.ModuleType("quality_index")
@@ -157,63 +59,36 @@ def training_metrics(name, on_validation=None, patch_size=64, dataset=DATASET):
     raw_input_models = {"EBVIF", "SpNet_plus_PanGAN", "SpNet_plus_VBPN"}
 
     def calc_qnr_mosaic(hrms, mosaic, pan, msfa_kernel, **official_settings):
-        # The other official trainers pass normalized evaluation tensors.
         if name not in raw_input_models:
             hrms, mosaic, pan = hrms * 4096, mosaic * 4096, pan * 4096
-        scores = uvpl_metrics.calc_qnr_test(
-            hrms,
-            mosaic,
-            pan,
-            msfa_kernel,
-            patch_size=patch_size,
-        )
-        if on_validation is not None:
-            on_validation(scores)
-        return scores
+        return uvpl_metrics.calc_qnr_test(hrms, mosaic, pan, msfa_kernel, patch_size=patch_size)
 
     module.calc_qnr_mosaic = calc_qnr_mosaic
-    if dataset != "real_world":
-        def calc_psnr(hrms, fused):
-            scores = uvpl_metrics.calc_reference_test(hrms, fused)
-            if on_validation is not None:
-                on_validation(scores)
-            return scores[0]
-
-        module.calc_psnr = calc_psnr
     return module
 
 
 def train_worker(args):
     from torch.utils.data import DataLoader
-    from test import EvaluationRecorder
 
     name = args.models[0]
-    work_directory = run_directory(args.output_root, name, args.run_id)
+    work_directory = args.output_root / name
     work_directory.mkdir(parents=True, exist_ok=True)
     os.chdir(work_directory)
-
-    # Supply the shared evaluation dependency to the official training entry.
-    recorder = None
-    if args.stage == "fusion" or args.dataset != "real_world":
-        index = 1 if args.stage == "demosaic" else 2
-        recorder = EvaluationRecorder(work_directory / str(index) / "record", name, "validation", args.dataset)
-    display = TrainingDisplay(name, args.stage, args.epochs, recorder)
-    sys.modules["quality_index"] = training_metrics(name, display.record_validation, args.patch_size, args.dataset)
+    sys.modules["quality_index"] = training_metrics(name, args.patch_size)
     entry = load_official_entry(training_script(name, args.stage, args.dataset))
-    display.install(entry)
 
     def data_loader(*loader_args, **loader_kwargs):
         loader = DataLoader(*loader_args, **loader_kwargs)
         if loader_kwargs.get("shuffle", False):
-            return EpochBatches(loader, args.steps_per_epoch, display, repeat=args.dataset == "real_world")
+            return EpochBatches(loader, args.steps_per_epoch, repeat=args.dataset == "real_world")
         return loader
 
     entry.DataLoader = data_loader
     demosaic_checkpoint = ""
     if args.stage == "fusion" and needs_demosaic_training(name):
-        demosaic_checkpoint = str(best_checkpoint(work_directory, "demosaic"))
+        demosaic_checkpoint = str(best_checkpoint(work_directory, name, "demosaic"))
     official_args = argparse.Namespace(
-        idx=1 if args.stage == "demosaic" else 2,
+        idx=stage_index(name, args.stage),
         dataset=args.dataset,
         data_path=str(args.data_root),
         train_size=args.train_size,
@@ -227,22 +102,21 @@ def train_worker(args):
         optimizer="adam",
         lr=args.lr,
         lr_decay=False,
-        save_freq=1,
+        save_freq=args.save_freq,
         device=args.device,
         num_workers=args.num_workers,
         resume="",
         resume_demosaic=demosaic_checkpoint,
         record=True,
-        visual=True,
+        visual=False,
         visual_freq=1,
         noise_level=args.noise_level,
     )
-    print(f"Model {name}, stage {args.stage}", flush=True)
-    print(f"Unified training arguments {vars(official_args)}", flush=True)
+    print(f"Dataset {args.dataset}, model {name}, stage {args.stage}", flush=True)
     entry.main(official_args)
 
 
-def worker_command(args, name, stage, run_id=0):
+def worker_command(args, name, stage):
     return [
         sys.executable, "-u", str(ROOT / "train.py"),
         "--worker", "--models", name, "--stage", stage,
@@ -256,25 +130,50 @@ def worker_command(args, name, stage, run_id=0):
         "--lr", str(args.lr),
         "--train-size", str(args.train_size),
         "--stride", str(args.stride),
+        "--save-freq", str(args.save_freq),
         "--num-workers", str(args.num_workers),
         "--patch-size", str(args.patch_size),
-        "--run-id", str(run_id),
         "--noise-level", *map(str, args.noise_level),
     ]
 
 
-def test_command(args, name, run_id=0):
+def test_command(args, name):
     return [
         sys.executable, "-u", str(ROOT / "test.py"),
-        "--models", name, "--stage", "all",
-        "--datasets", args.dataset,
+        "--models", name, "--datasets", args.dataset,
         "--data-root", str(args.data_root),
         "--output-root", str(args.output_root),
         "--device", args.device,
         "--patch-size", str(args.patch_size),
-        "--run-id", str(run_id),
         "--noise-level", *map(str, args.noise_level),
     ]
+
+
+def run_training(args):
+    names = select_models(args.models)
+    if args.worker:
+        if len(names) != 1 or args.stage == "all":
+            raise ValueError("A worker requires one model and one training stage.")
+        train_worker(args)
+        return []
+    if not args.dry_run:
+        check_dataset(args.data_root, args.dataset)
+
+    failures = []
+    for name in names:
+        stages = ["demosaic", "fusion"] if needs_demosaic_training(name) else ["fusion"]
+        if args.stage != "all":
+            stages = [stage for stage in stages if stage == args.stage]
+        work_directory = args.output_root / name
+        for stage in stages:
+            if run_command(worker_command(args, name, stage), work_directory, dry_run=args.dry_run):
+                failures.append(f"{args.dataset}/{name}/{stage}")
+                break
+        else:
+            if "fusion" in stages and not args.train_only:
+                if run_command(test_command(args, name), work_directory, dry_run=args.dry_run):
+                    failures.append(f"{args.dataset}/{name}/test")
+    return failures
 
 
 def main():
@@ -284,7 +183,6 @@ def main():
     parser.add_argument("--stage", choices=["all", "demosaic", "fusion"], default="all")
     parser.add_argument("--data-root", type=Path, default=DEFAULT_DATA_ROOT)
     parser.add_argument("--output-root", type=Path)
-    parser.add_argument("--run-id", type=int, help="Existing experiment number for staged training, 0 selects legacy outputs.")
     parser.add_argument("--device", default="0")
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--steps-per-epoch", type=int)
@@ -292,10 +190,11 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--train-size", type=int, default=64)
     parser.add_argument("--stride", type=int)
+    parser.add_argument("--save-freq", type=int)
     parser.add_argument("--noise-level", type=float, nargs=2)
     parser.add_argument("--num-workers", type=int, default=1)
     parser.add_argument("--patch-size", type=int, default=64)
-    parser.add_argument("--train-only", action="store_true", help="Complete training stages only.")
+    parser.add_argument("--train-only", action="store_true")
     parser.add_argument("--list-models", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
@@ -313,96 +212,22 @@ def main():
     failures = []
     for dataset in datasets:
         options = dataset_options(args, dataset)
-        failures.extend(run_training(options, parser))
+        sizes = (options.epochs, options.steps_per_epoch, options.batch_size,
+                 options.train_size, options.stride, options.save_freq)
+        if min(sizes) < 1 or options.lr <= 0 or options.num_workers < 0:
+            parser.error("Training sizes and learning rate must be positive, worker count nonnegative.")
+        if options.train_size % 8 or options.stride % 8:
+            parser.error("Training patch size and stride must be multiples of 8.")
+        if options.steps_per_epoch > (1000 if dataset == "real_world" else 500):
+            parser.error("Batch count exceeds the official UVPL loop limit.")
+        if options.patch_size < 2 or not 0 <= options.noise_level[0] <= options.noise_level[1]:
+            parser.error("Invalid metric patch size or noise range.")
+        try:
+            failures.extend(run_training(options))
+        except ValueError as error:
+            parser.error(str(error))
     if failures:
         raise SystemExit("Failed stages " + ", ".join(failures))
-
-
-def run_training(args, parser):
-    if min(args.epochs, args.steps_per_epoch, args.batch_size, args.train_size, args.stride) < 1:
-        parser.error("Training sizes and iteration counts must be positive.")
-    maximum_steps = 1000 if args.dataset == "real_world" else 500
-    if args.steps_per_epoch > maximum_steps:
-        parser.error(f"The official UVPL trainer supports at most {maximum_steps} batches per epoch for {args.dataset}.")
-    if not 0 <= args.noise_level[0] <= args.noise_level[1]:
-        parser.error("Noise levels must satisfy 0 <= lower <= upper.")
-    if args.train_size % 8 or args.stride % 8:
-        parser.error("Training patch size and stride must be multiples of 8 for the filter array.")
-    if args.lr <= 0 or args.num_workers < 0:
-        parser.error("Learning rate must be positive and worker count must be nonnegative.")
-    if args.patch_size < 2:
-        parser.error("Metric patch size must be at least 2.")
-    if args.run_id is not None and args.run_id < 0:
-        parser.error("Experiment number must be nonnegative.")
-    try:
-        names = select_models(args.models)
-        if args.worker:
-            if len(names) != 1 or args.stage == "all":
-                parser.error("A worker requires one model and one training stage.")
-            args.run_id = args.run_id or 0
-            train_worker(args)
-            return []
-        if not args.dry_run:
-            check_dataset(args.data_root, args.dataset)
-    except ValueError as error:
-        parser.error(str(error))
-
-    failures = []
-    for name in names:
-        stages = ["demosaic", "fusion"] if needs_demosaic_training(name) else ["fusion"]
-        if args.stage != "all":
-            stages = [stage for stage in stages if stage == args.stage]
-        if not stages:
-            continue
-        try:
-            if args.dry_run and args.run_id is not None:
-                run_id = args.run_id
-            elif args.run_id is not None:
-                run_id = resolve_run_id(args.output_root, name, args.run_id)
-            elif args.stage == "fusion" and needs_demosaic_training(name):
-                if args.dry_run and not (args.output_root / name).is_dir():
-                    run_id = allocate_run_id(args.output_root, name, reserve=False)
-                else:
-                    run_id = resolve_run_id(args.output_root, name)
-            else:
-                run_id = allocate_run_id(args.output_root, name, reserve=not args.dry_run)
-        except ValueError as error:
-            print(str(error), file=sys.stderr)
-            failures.append(name)
-            continue
-        work_directory = run_directory(args.output_root, name, run_id)
-        print(f"Dataset {args.dataset}, model {name}, experiment {run_id}, output {work_directory}", flush=True)
-        fusion_completed = False
-        for stage in stages:
-            command = worker_command(args, name, stage, run_id)
-            if args.dry_run:
-                print(shlex.join(command))
-                fusion_completed = stage == "fusion"
-                continue
-            index = 1 if stage == "demosaic" else 2
-            checkpoint_directory = work_directory / str(index) / "model"
-            if list(checkpoint_directory.glob("*.pth")):
-                print(f"Existing checkpoints in {checkpoint_directory}. Start with --stage all for a new experiment number.", file=sys.stderr)
-                failures.append(f"{name}/{stage}")
-                break
-            code = run_logged(
-                command,
-                work_directory,
-                work_directory / f"train_{stage}.log",
-                model=name,
-                epochs=args.epochs,
-            )
-            if code:
-                failures.append(f"{name}/{stage}")
-                break
-            fusion_completed = stage == "fusion"
-        if fusion_completed and not args.train_only:
-            command = test_command(args, name, run_id)
-            if args.dry_run:
-                print(shlex.join(command))
-            elif subprocess.run(command, check=False).returncode:
-                failures.append(f"{name}/test")
-    return [f"{args.dataset}/{failure}" for failure in failures]
 
 
 if __name__ == "__main__":
