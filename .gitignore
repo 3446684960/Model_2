@@ -1,0 +1,12 @@
+# Python and Jupyter caches
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Experiment outputs and logs
+/runs/
+*.log
+
+# PNG images and MATLAB data, including uppercase extensions
+*.[pP][nN][gG]
+*.[mM][aA][tT]
