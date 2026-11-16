@@ -7,3 +7,6 @@ __pycache__/
 # PNG images and MATLAB data, including uppercase extensions
 *.[pP][nN][gG]
 *.[mM][aA][tT]
+
+# PyTorch checkpoints
+*.[pP][tT][hH]
