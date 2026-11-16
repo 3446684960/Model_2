@@ -49,7 +49,7 @@ class MakeSimulateDataset(Dataset):
             for hrms_name in tqdm.tqdm(hrms_imgs):
                 if args.dataset == "CAVE":
                     hrms = scio.loadmat(os.path.join(base_path, hrms_name))["b"]
-                    hrms = hrms[:, :, 12:28]    # 挑选了16个波段？干什么的？
+                    hrms = hrms[:, :, 12:28]
                 elif args.dataset == "chikusei":
                     hrms = scio.loadmat(os.path.join(base_path, hrms_name))["chikusei"]
 

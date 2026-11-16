@@ -272,7 +272,7 @@ if __name__ == '__main__':
     parser.add_argument('--device', type=str, default='0', help='Device to train the model.')
     parser.add_argument('--num_workers', type=int, default=1, help='Num_workers to train the model.')
     parser.add_argument('--resume', type=str, default='', help='Index of the model to be resumed, eg. 1000.')
-    parser.add_argument('--data_path', type=str, default="../DataSet/", help='Path of the dataset.')
+    parser.add_argument('--data_path', type=str, default=os.path.expanduser("~/autodl-pub/Masico"), help='Path of the dataset.')
     parser.add_argument('--record', type=bool, default=True, help='Whether to record the PSNR of each epoch.')
 
     args = parser.parse_args()
