@@ -1,58 +1,10 @@
-# Unsupervised Variational Posterior Learning for Mosaic-Based Hyperspectral Fusion Imaging (UVPL)
+# 📖 Introduction
 
-<!-- [![IEEE Xplore](https://img.shields.io/badge/IEEE_Xplore-Paper-00629B?style=flat-square&logo=ieee&logoColor=white)](https://ieeexplore.ieee.org/document/11367377) -->
+The proposed method is a one-step method.
 
-Official PyTorch implementation of the paper: **"Unsupervised Variational Posterior Learning for Mosaic-Based Hyperspectral Fusion Imaging (UVPL)"**.
+---
 
-## 📖 Introduction
-
-In this repository, we provide the code for our proposed **UVPL** along with implementations of **7 state-of-the-art (SOTA) competing methods**. 
-
-Our goal is to provide a comprehensive benchmark for mosaiced and PAN image fusion. All methods share a **unified framework** and consistent execution logic, making it easy for researchers to reproduce results and compare performance.
-
-## 📂 Project Structure
-
-This repository contains **7 individual projects** (sub-folders), including:
-
-- **Proposed Method:** `Ours (UVPL)`
-- **Competing Methods:** `EFN`, `PPID_PanGAN`, `PPID_VBPN`, `SFNet_PanGAN`, `SFNet_VBPN`,  `LSAN_PanGAN`, `LSAN_VBPN`.
-
-### Unified Workflow
-Each project folder follows the exact same file structure and logic:
-
-| File Name | Function |
-| :--- | :--- |
-| `GetDataSet.py` | 🛠 **Data Preparation:** Generates training/testing data from raw datasets. |
-| `train.py` | 🚀 **Training:** Trains the model. |
-| `generate.py` | 💾 **Inference:** Generates fusion results using pretrained weights. |
-| `test.py` | 📊 **Evaluation:** Calculates quantitative metrics (PSNR, SAM, ERGAS, Q2n, QNR etc.). |
-| `visualize.py` | 🎨 **Visualization:** Visualizes the generated HSI and MAE map results. |
-
-## 📦 Pretrained Weights
-Pretrained weights of all the fusion methods are packaged in [Release](https://github.com/Nan-Wong98/Unsupervised-Variational-Posterior-Learning-for-Mosaic-Based-Hyperspectral-Fusion-Imaging/releases/tag/Pretrained_weights). Please refer to the directory mapping below:
-
-### Competing Methods
-Two stage: demosaicing + pansharpening
-
-| Component | CAVE | Chikusei | Real-world | Note |
-| :--- | :---: | :---: | :---: | :--- |
-| **Demosaicing** | Folder "1" | Folder "3" | Folder "5" | Used for SFNet, LSAN |
-| **Pansharpening**| Folder "2" | Folder "4" | Folder "6" | Used for PanGAN, VBPN |
-
-> **Note:** PPID uses a traditional demosaicing algorithm and does not require pretrained weights for the first stage.
-
-### Proposed Method (UVPL)
-**EFN** and **UVPL** are the one-step fusion framework.
-
-| Method | CAVE | Chikusei | Real-world |
-| :--- | :---: | :---: | :---: |
-| EFN | Folder "1" | Folder "2" | Folder "3" |
-| **UVPL (Proposed)** | Folder "1" | Folder "2" | Folder "3" |
-
-
-## 💾 Data Preparation
-
-We utilize both simulated datasets (CAVE, Chikusei) and an acquired real-world dataset for our experiments. Please refer to the following instructions to prepare the data.
+## 📂 Dataset Structure
 
 The dataset is organized as follows:
 ```
@@ -68,64 +20,185 @@ Dataset/
 └── test/
 ```
 
-### 1. Download Links
-Due to the file size, we host the prepared datasets on Baidu Netdisk:
+## 🚀 Usage
 
-* **CAVE Dataset (Simulated)**
-    * 📥 [Download Link](https://pan.baidu.com/s/1DrPQRold0AAR89hU9sfQ_Q)
-    * 🔑 Access Code: `bk9p`
+The command lines for **training**, **generation**, **testing**, and **visualization** are provided below.
 
-* **Chikusei Dataset (Simulated)**
-    * 📥 [Download Link](https://pan.baidu.com/s/1wBFLZcR1lk0iqtDBtfdxlQ)
-    * 🔑 Access Code: `42b3`
 
-* **Acquired Real-world Dataset**
-    * 📥 [Download Link](https://pan.baidu.com/s/12eg0GUfOky89Zkzqs6Rb0Q)
-    * 🔑 Access Code: `5ywe`
-
-## ⚙️ Requirements
-
-Install dependencies via:
-```bash
-pip install -r requirements.txt
-````
-
-<details>
-
-*   h5py==3.15.1
-*   Imath==0.0.2
-*   matplotlib==3.10.8
-*   numpy==2.4.1
-*   opencv_python==4.13.0.90
-*   OpenEXR==3.4.4
-*   pytorch_msssim==1.0.0
-*   scipy==1.17.0
-*   torch==2.10.0+cu126
-*   torchvision==0.25.0+cu126
-*   tqdm==4.67.1
-
-</details>
-
-## 📝 Citation
-
-If you find this code or our dataset useful for your research, please verify strictly and cite our paper:
+# 1. Train
+## 🟢 CAVE
 ```
-@article{EFN2026,
-  author={Wang, Nan and Dian, Renwei, and Guo, Anjing and Liu, Jinyang, and Li, Shutao},
-  journal={IEEE Transactions on Neural Networks and Learning Systems},
-  title={Unsupervised Variational Posterior Learning for Mosaic-Based Hyperspectral Fusion Imaging},
-  year={2026},
-  doi={10.1109/TNNLS.2026.3730458},
-  publisher={IEEE}
-}
+python train_simulate.py --idx 1 --data_path /data/wangn/DataSet --dataset CAVE --epochs 100 --train_size 64 --stride 32 --batch_size 16 --lr_decay --save_freq 10 --device 0 --noise_level 0.01 0.05
 ```
 
-## 📧 Contact
-If any question, please contact with me.
+## 🔵 Chikusei
+```
+python train_simulate.py --idx 2 --data_path /data/wangn/DataSet --dataset chikusei --epochs 20 --train_size 64 --stride 32 --batch_size 16 --lr_decay --save_freq 10 --device 7 --noise_level 0.01 0.03
+```
 
-E-mail: wangn@hnu.edu.cn
+## 🟠 realworld dataset
+```
+python train_realworld.py --idx 3 --data_path /data/wangn/DataSet --dataset real_world --epochs 10 --train_size 64 --stride 64 --batch_size 16 --lr_decay --save_freq 1 --visual --visual_freq 1 --device 4
+```
 
-## 🙏 Acknowledgments
-This project is based on the Equivariant Fusion Network (EFN) framework from our previous work:
+# 2. Generate
+## 🟢 CAVE
+### generate all
+```
+python generate.py --idx 1 --simulate --mosaic_save --pan_save --demosaic_save --gt_save --data_path /data/wangn/DataSet --dataset CAVE --load_model ./1/model/best_8.pth --noise_level 0.01 0.05
+```
 
-"Equivariant High-Resolution Hyperspectral Imaging via Mosaiced and PAN Image Fusion" (IEEE TIP 2026)📥[Github](https://github.com/Nan-Wong98/Equivariant-High-Resolution-Hyperspectral-Imaging-via-Mosaiced-and-PAN-Image-Fusion)
+### generate single
+```
+python generate.py --idx 1 --simulate --mosaic_save --pan_save --demosaic_save --gt_save --data_path /data/wangn/DataSet --dataset CAVE --load_model ./1/model/best_8.pth --noise_level 0.01 0.05 --data_id watercolors_ms.mat
+```
+
+## 🔵 Chikusei
+### generate all
+```
+python generate.py --idx 1 --simulate --mosaic_save --pan_save --demosaic_save --gt_save --data_path /data/wangn/DataSet --dataset chikusei --load_model ./2/model/best_6.pth --noise_level 0.01 0.03
+```
+
+### generate single
+```
+python generate.py --idx 1 --simulate --mosaic_save --pan_save --demosaic_save --gt_save --data_path /data/wangn/DataSet --dataset chikusei --load_model ./2/model/best_6.pth --noise_level 0.01 0.03 --data_id 3.mat
+```
+
+## 🟠 RealWorld
+### generate all
+```
+python generate.py --idx 1 --real_world --mosaic_save --pan_save --demosaic_save --data_path /data/wangn/DataSet --dataset real_world --load_model ./3/model/best_5.pth
+```
+
+### generate single
+```
+python generate.py --idx 1 --real_world --mosaic_save --pan_save --demosaic_save --data_path /data/wangn/DataSet --dataset real_world --load_model ./3/model/best_5.pth --data_id 2.raw 16.raw 31.raw
+```
+
+# 3. test
+## 🟢 Cave
+### test all
+```
+python test.py --idx 1 --simulate --data_path ./CAVE/1/result/mat/
+```
+
+### test single
+```
+python test.py --idx 1 --simulate --data_path ./CAVE/1/result/mat/ --data_id watercolors_ms.mat
+```
+## 🔵 Chikusei
+### test all
+```
+python test.py --idx 1 --simulate --data_path ./chikusei/1/result/mat/
+```
+
+### test single
+```
+python test.py --idx 1 --simulate --data_path ./chikusei/1/result/mat/ --data_id 3.mat
+```
+## 🟠 RealWorld
+### test all
+```
+python test.py --idx 1 --real_world --data_path ./real_world/1/result/mat/ --patch_size 64
+```
+
+### test single
+```
+python test.py --idx 1 --real_world --data_path ./real_world/1/result/mat/ --patch_size 64 --data_id 3.mat
+```
+
+# 4. Visualize
+## 🟢 CAVE
+### visualize fused
+```
+python visualize.py --visual_task rgb --spatial_ratio 8 --mat_path ./CAVE/1/result/mat/fused/ --save_path ./CAVE/1/result/rgb/fused/ --data_type fused --data_id watercolors_ms.mat --detach --detach_size 50 50 --detach_coordinate 140 230 140 230 --boxcolor b --boxwidth 2
+```
+
+### visualize diffmap
+```
+python visualize.py --visual_task diffmap --spatial_ratio 8 --mat_path ./CAVE/1/result/mat/fused/ --mat_path_for_diff ./CAVE/1/result/mat/gt/ --save_path ./CAVE/1/result/rgb/diffmap/ --data_id watercolors_ms.mat --detach --detach_size 50 50 --detach_coordinate 140 230 140 230 --boxcolor b --boxwidth 2 --mae_level 64 --sam_level 64
+```
+
+### visualize pan
+```
+python visualize.py --visual_task rgb --spatial_ratio 8 --mat_path ./CAVE/1/result/mat/pan/ --save_path ./CAVE/1/result/rgb/pan/ --data_type pan --data_id watercolors_ms.mat --detach --detach_size 50 50 --detach_coordinate 140 230 140 230 --boxcolor b --boxwidth 2
+```
+
+### visualize gt
+```
+python visualize.py --visual_task rgb --spatial_ratio 8 --mat_path ./CAVE/1/result/mat/gt/ --save_path ./CAVE/1/result/rgb/gt/ --data_type mosaic --data_id watercolors_ms.mat --detach --detach_size 50 50 --detach_coordinate 140 230 140 230 --boxcolor b --boxwidth 2
+```
+
+### visualize upmosaic
+```
+python visualize.py --visual_task rgb --spatial_ratio 8 --mat_path ./CAVE/1/result/mat/mosaic/ --save_path ./CAVE/1/result/rgb/upmosaic/ --data_type upmosaic --data_id watercolors_ms.mat --detach --detach_size 50 50 --detach_coordinate 140 230 140 230 --boxcolor b --boxwidth 2
+```
+
+## 🔵 Chikusei
+### visualize fused
+```
+python visualize.py --visual_task rgb --spatial_ratio 8 --mat_path ./chikusei/1/result/mat/fused/ --save_path ./chikusei/1/result/rgb/fused/ --data_type fused --data_id 3.mat --detach --detach_size 40 40 --detach_coordinate 80 240 80 240 --boxcolor b --boxwidth 2
+```
+
+### visualize diffmap
+```
+python visualize.py --visual_task diffmap --spatial_ratio 8 --mat_path ./chikusei/1/result/mat/fused/ --mat_path_for_diff ./chikusei/1/result/mat/gt/ --save_path ./chikusei/1/result/rgb/diffmap/ --data_id 3.mat --detach --detach_size 40 40 --detach_coordinate 80 240 80 240 --boxcolor b --boxwidth 2 --mae_level 32 --sam_level 32
+```
+
+### visualize pan
+```
+python visualize.py --visual_task rgb --spatial_ratio 8 --mat_path ./chikusei/1/result/mat/pan/ --save_path ./chikusei/1/result/rgb/pan/ --data_type pan --data_id 3.mat --detach --detach_size 40 40 --detach_coordinate 80 240 80 240 --boxcolor b --boxwidth 2
+```
+
+### visualize gt
+```
+python visualize.py --visual_task rgb --spatial_ratio 8 --mat_path ./chikusei/1/result/mat/gt/ --save_path ./chikusei/1/result/rgb/gt/ --data_type mosaic --data_id 3.mat --detach --detach_size 40 40 --detach_coordinate 80 240 80 240 --boxcolor b --boxwidth 2
+```
+
+### visualize upmosaic
+```
+python visualize.py --visual_task rgb --spatial_ratio 8 --mat_path ./chikusei/1/result/mat/mosaic/ --save_path ./chikusei/1/result/rgb/upmosaic/ --data_type upmosaic --data_id 3.mat --detach --detach_size 40 40 --detach_coordinate 80 240 80 240 --boxcolor b --boxwidth 2
+```
+
+## 🟠 real-world
+### visualize fused
+#### img1
+```
+python visualize.py --visual_task rgb --spatial_ratio 8 --mat_path ./real_world/1/result/mat/fused/ --save_path ./real_world/1/result/rgb/fused/ --data_id 2.mat --data_type fused --detach --detach_size 192 192 --detach_coordinate 860 510 860 510 --boxwidth 8 --boxcolor b
+```
+#### img2
+```
+python visualize.py --visual_task rgb --spatial_ratio 8 --mat_path ./real_world/1/result/mat/fused/ --save_path ./real_world/1/result/rgb/fused/ --data_id 16.mat --data_type fused --detach --detach_size 192 192 --detach_coordinate 750 1170 750 1170 --boxwidth 8 --boxcolor b
+```
+#### img3
+```
+python visualize.py --visual_task rgb --spatial_ratio 8 --mat_path ./real_world/1/result/mat/fused/ --save_path ./real_world/1/result/rgb/fused/ --data_id 31.mat --data_type fused --detach --detach_size 192 192 --detach_coordinate 460 1170 460 1170 --boxwidth 8 --boxcolor b
+```
+
+### visualize pan
+#### img1
+```
+python visualize.py --visual_task rgb --spatial_ratio 8 --mat_path ./real_world/1/result/mat/pan/ --save_path ./real_world/1/result/rgb/pan/ --data_id 2.mat --data_type pan --detach --detach_size 192 192 --detach_coordinate 860 510 860 510 --boxwidth 8 --boxcolor b
+```
+#### img2
+```
+python visualize.py --visual_task rgb --spatial_ratio 8 --mat_path ./real_world/1/result/mat/pan/ --save_path ./real_world/1/result/rgb/pan/ --data_id 16.mat --data_type pan --detach --detach_size 192 192 --detach_coordinate 750 1170 750 1170 --boxwidth 8 --boxcolor b
+```
+#### img3
+```
+python visualize.py --visual_task rgb --spatial_ratio 8 --mat_path ./real_world/1/result/mat/pan/ --save_path ./real_world/1/result/rgb/pan/ --data_id 31.mat --data_type pan --detach --detach_size 192 192 --detach_coordinate 460 1170 460 1170 --boxwidth 8 --boxcolor b
+```
+
+### visualize upmosaic
+#### img1
+```
+python visualize.py --visual_task rgb --spatial_ratio 8 --mat_path ./real_world/1/result/mat/mosaic/ --save_path ./real_world/1/result/rgb/upmosaic/ --data_id 2.mat --data_type upmosaic --detach --detach_size 192 192 --detach_coordinate 860 510 860 510 --boxwidth 8 --boxcolor b
+```
+#### img2
+```
+python visualize.py --visual_task rgb --spatial_ratio 8 --mat_path ./real_world/1/result/mat/mosaic/ --save_path ./real_world/1/result/rgb/upmosaic/ --data_id 16.mat --data_type upmosaic --detach_size 192 192 --detach --detach_coordinate 750 1170 750 1170 --boxwidth 8 --boxcolor b
+```
+#### img3
+```
+python visualize.py --visual_task rgb --spatial_ratio 8 --mat_path ./real_world/1/result/mat/mosaic/ --save_path ./real_world/1/result/rgb/upmosaic/ --data_id 31.mat --data_type upmosaic --detach --detach_size 192 192 --detach_coordinate 460 1170 460 1170 --boxwidth 8 --boxcolor b
+```

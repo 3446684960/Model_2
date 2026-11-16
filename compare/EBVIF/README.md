@@ -1,57 +1,10 @@
-# Equivariant Bayesian Hyperspectral Imaging via Mosaiced and PAN Image Fusion (EBVIF)
+# 📖 Introduction
 
-[![IEEE Xplore](https://img.shields.io/badge/IEEE_Xplore-Paper-00629B?style=flat-square&logo=ieee&logoColor=white)](https://ieeexplore.ieee.org/document/11480451)
+Compared to competing methods, this proposed method is a one-step method.
 
-Official PyTorch implementation of the paper: **"Equivariant Bayesian Hyperspectral Imaging via Mosaiced and PAN Image Fusion (EBVIF)"**.
+---
 
-## 📖 Introduction
-
-In this repository, we provide the code for our proposed **Equivariant Bayesian Variational Inference Framework (EBVIF)** along with implementations of **8 state-of-the-art (SOTA) competing methods**.
-
-Our goal is to provide a comprehensive benchmark for mosaiced and PAN image fusion. All methods share a **unified framework** and consistent execution logic, making it easy for researchers to reproduce results and compare performance.
-
-## 📂 Project Structure
-
-This repository contains **9 individual projects** (sub-folders), including:
-
-- **Proposed Method:** `EBVIF`
-- **Competing Methods:** `PPID_PanGAN`, `PPID_VBPN`, `SpNet_PanGAN`, `SpNet_VBPN`, `SFNet_PanGAN`, `SFNet_VBPN`, `LSAN_PanGAN`, `LSAN_VBPN`.
-
-### Unified Workflow
-Each project folder follows the exact same file structure and logic:
-
-| File Name | Function |
-| :--- | :--- |
-| `GetDataSet.py` | 🛠 **Data Preparation:** Generates training/testing data from raw datasets. |
-| `train.py` | 🚀 **Training:** Trains the model. |
-| `generate.py` | 💾 **Inference:** Generates fusion results using pretrained weights. |
-| `test.py` | 📊 **Evaluation:** Calculates quantitative metrics (PSNR, SAM, ERGAS, Q2n, QNR etc.). |
-| `visualize.py` | 🎨 **Visualization:** Visualizes the generated HSI and MAE map results. |
-
-## 📦 Pretrained Weights
-Pretrained weights of all the fusion methods are packaged in [Release](https://github.com/Nan-Wong98/Equivariant-Bayesian-variational-inference-framework/releases/tag/tag1). Please refer to the directory mapping below:
-
-### Competing Methods
-Two stage: demosaicing + pansharpening
-
-| Component | CAVE | ICVL | Real-world | Note |
-| :--- | :---: | :---: | :---: | :--- |
-| **Demosaicing** | Folder "1" | Folder "3" | Folder "5" | Used for SpNet, SFNet, LSAN |
-| **Pansharpening**| Folder "2" | Folder "4" | Folder "6" | Used for PanGAN, VBPN |
-
-> **Note:** PPID uses a traditional demosaicing algorithm and does not require pretrained weights for the first stage.
-
-### Proposed Method (EBVIF)
-**EBVIF** is a one-step fusion framework.
-
-| Method | CAVE | ICVL | Real-world |
-| :--- | :---: | :---: | :---: |
-| **EBVIF (Proposed)** | Folder "1" | Folder "2" | Folder "3" |
-
-
-## 💾 Data Preparation
-
-We utilize both simulated datasets (CAVE, ICVL) and an acquired real-world dataset for our experiments. Please refer to the following instructions to prepare the data.
+## 📂 Dataset Structure
 
 The dataset is organized as follows:
 ```
@@ -67,78 +20,185 @@ Dataset/
 └── test/
 ```
 
-### 1. Download Links
-Due to the file size, we host the prepared datasets on Baidu Netdisk:
+## 🚀 Usage
 
-* **CAVE Dataset (Simulated)**
-    * 📥 [Download Link](https://pan.baidu.com/s/1DrPQRold0AAR89hU9sfQ_Q)
-    * 🔑 Access Code: `bk9p`
+The command lines for **training**, **generation**, **testing**, and **visualization** are provided below.
 
-* **Acquired Real-world Dataset**
-    * 📥 [Download Link](https://pan.baidu.com/s/12eg0GUfOky89Zkzqs6Rb0Q)
-    * 🔑 Access Code: `5ywe`
 
-### 2. ICVL Dataset Setup
-The ICVL dataset is not redistributed here due to its large scale. Please download the original data from the [Official Website](https://cndaqiang.github.io/ICVL-Natural-Hyperspectral-Image-Database/index.html).
-
-**Train/Test Split:**
-Among the total 200 images, we strictly follow the split of **160 images for training** and **40 images for testing**.
-
-<details>
-
-'bguCAMP_0514-1711.mat', 'bguCAMP_0514-1718.mat', 'bguCAMP_0514-1724.mat', 'bgu_0403-1439.mat', 'bgu_0403-1511.mat', 'bgu_0403-1525.mat', 'BGU_0522-1217.mat', 'eve_0331-1601.mat', 'eve_0331-1618.mat', 'Flower_0325-1336.mat', 'gavyam_0823-0944.mat', 'Labtest_0910-1510.mat', 'lehavim_0910-1607.mat', 'Lehavim_0910-1629.mat', 'Lehavim_0910-1630.mat', 'Lehavim_0910-1635.mat', 'Lehavim_0910-1636.mat', 'nachal_0823-1040.mat', 'nachal_0823-1118.mat', 'nachal_0823-1127.mat', 'nachal_0823-1152.mat', 'objects_0924-1605.mat', 'objects_0924-1620.mat', 'objects_0924-1622.mat', 'objects_0924-1628.mat', 'objects_0924-1631.mat', 'objects_0924-1645.mat', 'omer_0331-1102.mat', 'omer_0331-1118.mat', 'omer_0331-1130.mat', 'peppers_0503-1330.mat', 'peppers_0503-1332.mat', 'pepper_0503-1228.mat', 'pepper_0503-1229.mat', 'prk_0328-1025.mat', 'rmt_0328-1241-1.mat', 'rmt_0328-1249-1.mat', 'rsh_0406-1413.mat', 'rsh_0406-1443.mat', 'sat_0406-1107.mat'
-
-</details>
-
-## ⚙️ Requirements
-
-Install dependencies via:
-```bash
-pip install -r requirements.txt
-````
-
-<details>
-
-*   h5py==3.15.1
-*   Imath==0.0.2
-*   matplotlib==3.10.8
-*   numpy==2.4.1
-*   opencv_python==4.13.0.90
-*   OpenEXR==3.4.4
-*   pytorch_msssim==1.0.0
-*   scipy==1.17.0
-*   torch==2.10.0+cu126
-*   torchvision==0.25.0+cu126
-*   tqdm==4.67.1
-
-</details>
-
-## 📝 Citation
-
-If you find this code or our dataset useful for your research, please verify strictly and cite our paper:
+# 1. Train
+## 🟢 CAVE 
 ```
-@ARTICLE{11480451,
-  author={Dian, Renwei and Wang, Nan and Guo, Anjing and Li, Shutao},
-  journal={IEEE Transactions on Pattern Analysis and Machine Intelligence}, 
-  title={Equivariant Bayesian Hyperspectral Imaging via Mosaiced and PAN Image Fusion}, 
-  year={2026},
-  volume={},
-  number={},
-  pages={1-16},
-  doi={10.1109/TPAMI.2026.3682543}
-  }
+python train_simulate.py --idx 1 --data_path ../../DataSet --dataset CAVE --epochs 100 --train_size 64 --stride 32 --batch_size 16 --lr_decay --save_freq 50 --device 7 --noise_level 0.01 0.05
 ```
 
-## 📧 Contact
-If any question, please contact with me.
+## 🔵 ICVL
+```
+python train_simulate.py --idx 2 --data_path ../../DataSet --dataset ICVL --epochs 10 --train_size 64 --stride 64 --batch_size 16 --lr_decay --save_freq 5 --device 7 --noise_level 0.008 0.01
+```
 
-E-mail: wangn@hnu.edu.cn
+## 🟠 realworld dataset
+```
+python train_realworld.py --idx 3 --data_path ../../DataSet --dataset real_world --epochs 10 --train_size 64 --stride 64 --batch_size 16 --lr_decay --save_freq 1 --visual --visual_freq 1 --device 6
+```
 
-Wechat: wn343816504
+# 2. Generate
+## 🟢 CAVE
+### generate all
+```
+python generate.py --idx 1 --simulate --mosaic_save --pan_save --demosaic_save --gt_save --data_path ../../DataSet/ --dataset CAVE --load_model ./1/model/best_47.pth --noise_level 0.01 0.05
+```
 
-## 🙏 Acknowledgments
-This project is based on the Equivariant Fusion Network (EFN) framework from our previous work:
+### generate single
+```
+python generate.py --idx 1 --simulate --mosaic_save --pan_save --demosaic_save --gt_save --data_path ../../DataSet/ --dataset CAVE --load_model ./1/model/best_47.pth --noise_level 0.01 0.05 --data_id jelly_beans_ms.mat
+```
 
-"Equivariant High-Resolution Hyperspectral Imaging via Mosaiced and PAN Image Fusion" (IEEE TIP 2026)📥[Github](https://github.com/Nan-Wong98/Equivariant-High-Resolution-Hyperspectral-Imaging-via-Mosaiced-and-PAN-Image-Fusion)
+## 🔵 ICVL
+### generate all
+```
+python generate.py --idx 1 --simulate --mosaic_save --pan_save --demosaic_save --gt_save --data_path ../../DataSet/ --dataset ICVL --load_model ./2/model/best_7.pth --noise_level 0.008 0.01
+```
 
-We extend the unified benchmark framework from EFN and introduce our Equivariant Bayesian Variational Inference Framework (EBVIF) with Bayesian uncertainty modeling for more complexed applications.
+### generate single
+```
+python generate.py --idx 1 --simulate --mosaic_save --pan_save --demosaic_save --gt_save --data_path ../../DataSet/ --dataset ICVL --load_model ./2/model/best_7.pth --noise_level 0.008 0.01 --data_id pepper_0503-1228.mat
+```
+
+## 🟠 RealWorld
+### generate all
+```
+python generate.py --idx 1 --real_world --mosaic_save --pan_save --demosaic_save --data_path ../../DataSet/ --dataset real_world --load_model ./3/model/best_4.pth
+```
+
+### generate single
+```
+python generate.py --idx 1 --real_world --mosaic_save --pan_save --demosaic_save --data_path ../../DataSet/ --dataset real_world --load_model ./3/model/best_4.pth --data_id 1.raw 16.raw 37.raw
+```
+
+# 3. test
+## 🟢 Cave
+### test all
+```
+python test.py --idx 1 --simulate --data_path ./CAVE/1/result/mat/
+```
+
+### test single
+```
+python test.py --idx 1 --simulate --data_path ./CAVE/1/result/mat/ --data_id jelly_beans_ms.mat
+```
+## 🔵 ICVL
+### test all
+```
+python test.py --idx 1 --simulate --data_path ./ICVL/1/result/mat/
+```
+
+### test single
+```
+python test.py --idx 1 --simulate --data_path ./ICVL/1/result/mat/ --data_id pepper_0503-1228.mat
+```
+## 🟠 RealWorld
+### test all
+```
+python test.py --idx 1 --real_world --data_path ./real_world/1/result/mat/ --patch_size 64
+```
+
+### test single
+```
+python test.py --idx 1 --real_world --data_path ./real_world/1/result/mat/ --patch_size 64 --data_id 3.mat
+```
+
+# 4. Visualize
+## 🟢 CAVE
+### visualize fused
+```
+python visualize.py --visual_task rgb --spatial_ratio 8 --mat_path ./CAVE/1/result/mat/fused/ --save_path ./CAVE/1/result/rgb/fused/ --data_type fused --data_id jelly_beans_ms.mat --detach --detach_size 25 25 --detach_coordinate 210 98 210 98 --boxcolor b --boxwidth 1
+```
+
+### visualize diffmap
+```
+python visualize.py --visual_task diffmap --spatial_ratio 8 --mat_path ./CAVE/1/result/mat/fused/ --mat_path_for_diff ./CAVE/1/result/mat/gt/ --save_path ./CAVE/1/result/rgb/diffmap/ --data_id jelly_beans_ms.mat --detach --detach_size 25 25 --detach_coordinate 210 98 210 98 --boxcolor b --boxwidth 1 --mae_level 64 --sam_level 64
+```
+
+### visualize pan
+```
+python visualize.py --visual_task rgb --spatial_ratio 8 --mat_path ./CAVE/1/result/mat/pan/ --save_path ./CAVE/1/result/rgb/pan/ --data_type pan --data_id jelly_beans_ms.mat --detach --detach_size 25 25 --detach_coordinate 210 98 210 98 --boxcolor b --boxwidth 1
+```
+
+### visualize gt
+```
+python visualize.py --visual_task rgb --spatial_ratio 8 --mat_path ./CAVE/1/result/mat/gt/ --save_path ./CAVE/1/result/rgb/gt/ --data_type mosaic --data_id jelly_beans_ms.mat --detach --detach_size 25 25 --detach_coordinate 210 98 210 98 --boxcolor b --boxwidth 1
+```
+
+### visualize upmosaic
+```
+python visualize.py --visual_task rgb --spatial_ratio 8 --mat_path ./CAVE/1/result/mat/mosaic/ --save_path ./CAVE/1/result/rgb/upmosaic/ --data_id jelly_beans_ms.mat --detach --detach_size 25 25 --detach_coordinate 210 98 210 98 --boxcolor b --boxwidth 1
+```
+
+## 🔵 ICVL
+### visualize fused
+```
+python visualize.py --visual_task rgb --spatial_ratio 8 --mat_path ./ICVL/1/result/mat/fused/ --save_path ./ICVL/1/result/rgb/fused/ --data_type fused --data_id pepper_0503-1228.mat --detach --detach_size 64 64 --detach_coordinate 135 625 135 625 --boxcolor b --boxwidth 3
+```
+
+### visualize diffmap
+```
+python visualize.py --visual_task diffmap --spatial_ratio 8 --mat_path ./ICVL/1/result/mat/fused/ --mat_path_for_diff ./ICVL/1/result/mat/gt/ --save_path ./ICVL/1/result/rgb/diffmap/ --data_id pepper_0503-1228.mat --detach --detach_size 64 64 --detach_coordinate 135 625 135 625 --boxcolor b --boxwidth 3 --mae_level 16 --sam_level 16
+```
+
+### visualize pan
+```
+python visualize.py --visual_task rgb --spatial_ratio 8 --mat_path ./ICVL/1/result/mat/pan/ --save_path ./ICVL/1/result/rgb/pan/ --data_type pan --data_id pepper_0503-1228.mat --detach --detach_size 128 128 --detach_coordinate 300 600 100 160 --boxcolor r
+```
+
+### visualize gt
+```
+python visualize.py --visual_task rgb --spatial_ratio 8 --mat_path ./ICVL/1/result/mat/gt/ --save_path ./ICVL/1/result/rgb/gt/ --data_type mosaic --data_id pepper_0503-1228.mat --detach --detach_size 64 64 --detach_coordinate 135 625 135 625 --boxcolor b --boxwidth 3
+```
+
+### visualize upmosaic
+```
+python visualize.py --visual_task rgb --spatial_ratio 8 --mat_path ./ICVL/1/result/mat/mosaic/ --save_path ./ICVL/1/result/rgb/upmosaic/ --data_type upmosaic --data_id Lehavim_0910-1630.mat --detach --detach_size 128 128 --detach_coordinate 300 600 100 160 --boxcolor r
+```
+
+## 🟠 real-world
+### visualize fused
+#### img1
+```
+python visualize.py --visual_task rgb --spatial_ratio 8 --mat_path ./real_world/1/result/mat/fused/ --save_path ./real_world/1/result/rgb/fused/ --data_id 1.mat --data_type fused --detach --detach_size 128 128 --detach_coordinate 1780 270 1780 270 --boxwidth 5 --boxcolor b
+```
+#### img2
+```
+python visualize.py --visual_task rgb --spatial_ratio 8 --mat_path ./real_world/1/result/mat/fused/ --save_path ./real_world/1/result/rgb/fused/ --data_id 16.mat --data_type fused --detach --detach_size 128 128 --detach_coordinate 740 270 740 270 --boxwidth 5 --boxcolor b
+```
+#### img3
+```
+python visualize.py --visual_task rgb --spatial_ratio 8 --mat_path ./real_world/1/result/mat/fused/ --save_path ./real_world/1/result/rgb/fused/ --data_id 37.mat --data_type fused --detach --detach_size 128 128 --detach_coordinate 740 770 740 770 --boxwidth 5 --boxcolor b
+```
+
+### visualize pan
+#### img1
+```
+python visualize.py --visual_task rgb --spatial_ratio 8 --mat_path ./real_world/1/result/mat/pan/ --save_path ./real_world/1/result/rgb/pan/ --data_id 1.mat --data_type pan --detach --detach_size 128 128 --detach_coordinate 1780 270 1780 270 --boxwidth 5 --boxcolor b
+```
+#### img2
+```
+python visualize.py --visual_task rgb --spatial_ratio 8 --mat_path ./real_world/1/result/mat/pan/ --save_path ./real_world/1/result/rgb/pan/ --data_id 1.mat --data_type pan --detach --detach_size 128 128 --detach_coordinate 740 270 740 270 --boxwidth 5 --boxcolor b
+```
+#### img3
+```
+python visualize.py --visual_task rgb --spatial_ratio 8 --mat_path ./real_world/1/result/mat/pan/ --save_path ./real_world/1/result/rgb/pan/ --data_id 1.mat --data_type pan --detach --detach_size 128 128 --detach_coordinate 740 770 740 770 --boxwidth 5 --boxcolor b
+```
+
+### visualize upmosaic
+#### img1
+```
+python visualize.py --visual_task rgb --spatial_ratio 8 --mat_path ./real_world/1/result/mat/mosaic/ --save_path ./real_world/1/result/rgb/upmosaic/ --data_id 1.mat --data_type upmosaic --detach --detach_size 128 128 --detach_coordinate 1780 270 1780 270 --boxwidth 5 --boxcolor b
+```
+#### img2
+```
+python visualize.py --visual_task rgb --spatial_ratio 8 --mat_path ./real_world/1/result/mat/mosaic/ --save_path ./real_world/1/result/rgb/upmosaic/ --data_id 1.mat --data_type upmosaic --detach --detach_size 128 128 --detach_coordinate 740 270 740 270 --boxwidth 5 --boxcolor b
+```
+#### img3
+```
+python visualize.py --visual_task rgb --spatial_ratio 8 --mat_path ./real_world/1/result/mat/mosaic/ --save_path ./real_world/1/result/rgb/upmosaic/ --data_id 1.mat --data_type upmosaic --detach_size 128 128 --detach_coordinate 740 770 740 770 --boxwidth 5 --boxcolor b
+```

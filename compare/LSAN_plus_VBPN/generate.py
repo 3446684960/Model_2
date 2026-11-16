@@ -1,9 +1,3 @@
-import sys
-from pathlib import Path
-
-sys.path.append(str(Path(__file__).resolve().parents[2]))
-from simulation import simulate_observations
-
 from model import Mpattern_opt, VIRAttResUNetSR
 import torch
 import os
@@ -60,14 +54,47 @@ def main(args):
     ids, mosaics, pans, gts = [], [], [], []
 
     if args.simulate == True:
+        if args.data_id == []:
+            data_names = os.listdir(data_path)
+        else:
+            data_names = [file for file in os.listdir(data_path) if file in args.data_id]
         MSFA = numpy.array([[0, 1, 2, 3],
                             [4, 5, 6, 7],
                             [8, 9, 10, 11],
                             [12, 13, 14, 15]])
 
-        for data_name, hrms, lrms, mosaic, pan in tqdm.tqdm(simulate_observations(args, "test")):
-            mosaic_noise = mosaic
-            pan_noise = pan
+        for data_name in tqdm.tqdm(data_names):
+            data_dir = os.path.join(data_path, data_name)
+            if args.dataset == "CAVE":
+                hrms = scio.loadmat(data_dir)["b"]
+                hrms = hrms[:, :, 12:28]
+            elif args.dataset == "chikusei":
+                hrms = scio.loadmat(data_dir)["chikusei"]
+            hrms = hrms[:hrms.shape[0]//(args.msfa_size*args.spatial_ratio)*(args.msfa_size*args.spatial_ratio),
+                        :hrms.shape[1]//(args.msfa_size*args.spatial_ratio)*(args.msfa_size*args.spatial_ratio)].astype(numpy.float32)
+
+            # MS simulate
+            # downsampling
+            ms_tensor = torch.from_numpy(hrms).permute(2, 0, 1).unsqueeze(0)
+            lrms_tensor = torch.nn.functional.avg_pool2d(ms_tensor, 2, 2)
+            lrms = lrms_tensor[0].permute(1, 2, 0).numpy()
+
+            # mosaicing
+            mosaic = utils.MSFA_filter(lrms, MSFA)
+
+            # adding noise, numpy.random.seed(42)
+            std = numpy.random.uniform(args.noise_level[0], args.noise_level[1])
+            mosaic_noise = mosaic + numpy.random.normal(size=mosaic.shape) * std
+            mosaic_noise = numpy.clip(mosaic_noise, a_min=0, a_max=1.0)
+
+            # PAN simulate
+            spe_res = numpy.array([1., 1, 2, 4, 8, 9, 10, 12, 16, 12, 10, 9, 7, 3, 2, 1])
+            spe_res /= spe_res.sum()
+            pan = numpy.sum(hrms * spe_res, axis=-1, keepdims=True)
+            # adding noise, set numpy.random.seed(42)
+            std = numpy.random.uniform(args.noise_level[0], args.noise_level[1])
+            pan_noise = pan + numpy.random.normal(size=pan.shape) * std
+            pan_noise = numpy.clip(pan_noise, a_min=0, a_max=1.0)
 
             mosaics.append(mosaic_noise)
             pans.append(pan_noise)
