@@ -10,3 +10,11 @@ __pycache__/
 
 # PyTorch checkpoints
 *.[pP][tT][hH]
+
+# Runtime logs
+*.log
+
+# Experiment metric CSV files
+/runs/**
+!/runs/**/
+!/runs/**/*.csv
