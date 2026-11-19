@@ -16,6 +16,56 @@ from degradation import MosaicDegradation, PanDegradation
 from model import FusionNet
 
 
+def create_gaussian_kernel(kernel_size, sigma, device, dtype):
+    coordinates = torch.arange(kernel_size, device=device, dtype=dtype) - kernel_size // 2
+    kernel_1d = torch.exp(-(coordinates ** 2) / (2 * sigma ** 2))
+    kernel_1d = kernel_1d / kernel_1d.sum()
+    return torch.outer(kernel_1d, kernel_1d).view(1, 1, kernel_size, kernel_size)
+
+
+def blur_pan(pan, kernel_size, sigma_min, sigma_max):
+    sigma = torch.empty(1, device=pan.device).uniform_(sigma_min, sigma_max).item()
+    kernel = create_gaussian_kernel(kernel_size, sigma, pan.device, pan.dtype)
+    padding = kernel_size // 2
+    return F.conv2d(F.pad(pan, (padding, padding, padding, padding), mode="reflect"), kernel)
+
+
+def create_spectral_leakage_matrix(num_bands, leakage, sigma, device, dtype):
+    positions = torch.arange(num_bands, device=device, dtype=dtype)
+    distance = positions[:, None] - positions[None, :]
+    neighbours = torch.exp(-(distance ** 2) / (2 * sigma ** 2))
+    neighbours.fill_diagonal_(0)
+    neighbours = neighbours / neighbours.sum(dim=1, keepdim=True)
+    identity = torch.eye(num_bands, device=device, dtype=dtype)
+    return (1 - leakage) * identity + leakage * neighbours
+
+
+def degrade_mosaic_input(mosaic, msfa_reconstruction, msfa_size, max_leakage, leakage_sigma):
+    aligned_cube = msfa_reconstruction(mosaic, mosaic.shape[-2:])
+    leakage = torch.empty(1, device=mosaic.device).uniform_(0, max_leakage).item()
+    response = create_spectral_leakage_matrix(aligned_cube.shape[1], leakage, leakage_sigma,
+                                               mosaic.device, mosaic.dtype)
+    leaked_cube = torch.einsum("ij,bjhw->bihw", response, aligned_cube)
+
+    mask = torch.zeros(1, aligned_cube.shape[1], msfa_size, msfa_size,
+                       device=mosaic.device, dtype=mosaic.dtype)
+    for row in range(msfa_size):
+        for col in range(msfa_size):
+            mask[0, row * msfa_size + col, row, col] = 1
+
+    repeat_h = mosaic.shape[-2] // msfa_size
+    repeat_w = mosaic.shape[-1] // msfa_size
+    mask = mask.repeat(1, 1, repeat_h, repeat_w)
+    return torch.sum(leaked_cube * mask, dim=1, keepdim=True)
+
+
+def create_degraded_inputs(mosaic, pan, msfa_reconstruction, args):
+    degraded_mosaic = degrade_mosaic_input(mosaic, msfa_reconstruction, args.msfa_size,
+                                            args.mosaic_max_leakage, args.mosaic_leakage_sigma)
+    degraded_pan = blur_pan(pan, args.pan_blur_kernel, args.pan_blur_sigma_min, args.pan_blur_sigma_max)
+    return degraded_mosaic, degraded_pan
+
+
 def train(fuse_net: nn.Module, mosaic_degradation: nn.Module, pan_degradation: nn.Module,
           optimizer, train_dataloader, val_dataloader, args):
     print("===> Begin Training!")
@@ -41,12 +91,20 @@ def train(fuse_net: nn.Module, mosaic_degradation: nn.Module, pan_degradation: n
 
             optimizer.zero_grad()
 
-            hrhsi_hat = fuse_net(mosaic, pan)
+            if args.degraded_input_training:
+                mosaic_input, pan_input = create_degraded_inputs(
+                    mosaic, pan, fuse_net.mosaic_branch.msfa_reconstruction, args
+                )
+            else:
+                mosaic_input, pan_input = mosaic, pan
+
+            hrhsi_hat = fuse_net(mosaic_input, pan_input)
             mosaic_hat = mosaic_degradation(hrhsi_hat)
             pan_hat = pan_degradation(hrhsi_hat)
 
             loss_mosaic = F.l1_loss(mosaic_hat, mosaic)
             loss_pan = F.l1_loss(pan_hat, pan)
+
             loss = loss_mosaic + args.lambda_pan * loss_pan
 
             loss.backward()
@@ -220,6 +278,12 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--lr_response", type=float, default=1e-5)
     parser.add_argument("--optimize_srf", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--degraded_input_training", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--mosaic_max_leakage", type=float, default=0.15)
+    parser.add_argument("--mosaic_leakage_sigma", type=float, default=1.0)
+    parser.add_argument("--pan_blur_kernel", type=int, default=7)
+    parser.add_argument("--pan_blur_sigma_min", type=float, default=0.5)
+    parser.add_argument("--pan_blur_sigma_max", type=float, default=1.5)
     parser.add_argument("--lambda_pan", type=float, default=1.0)
     parser.add_argument("--device", type=str, default="0")
     parser.add_argument("--num_workers", type=int, default=1)
