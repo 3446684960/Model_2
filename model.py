@@ -128,13 +128,15 @@ class SpectralMixingBlock(nn.Module):
 
 class MosaicSpectralBranch(nn.Module):
 
-    def __init__(self, num_bands=16, msfa_size=4, msfa_pattern=None, feature_channels=64, num_blocks=3):
+    def __init__(self, num_bands=16, num_endmembers=6, msfa_size=4, msfa_pattern=None,
+                 feature_channels=64, num_blocks=3):
         super().__init__()
 
         if num_bands != msfa_size ** 2:
             raise ValueError(f"num_bands must equal msfa_size ** 2, but got {num_bands} and {msfa_size}.")
 
         self.num_bands = num_bands
+        self.num_endmembers = num_endmembers
         self.msfa_size = msfa_size
 
         self.spectral_mixing = SpectralMixingBlock(num_bands=num_bands)
@@ -154,7 +156,10 @@ class MosaicSpectralBranch(nn.Module):
             *[ResidualBlock(feature_channels) for _ in range(num_blocks)]
         )
 
-        self.base_head = nn.Conv2d(feature_channels, num_bands, kernel_size=3, padding=1)
+        self.basis_head = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(feature_channels, num_bands * num_endmembers, kernel_size=1),
+        )
 
     def forward(self, mosaic, target_size):
         if mosaic.ndim != 4 or mosaic.shape[1] != 1:
@@ -168,9 +173,10 @@ class MosaicSpectralBranch(nn.Module):
         spectral_cube, spectral_weights = self.spectral_mixing(mosaic_cube)
         spectral_feature = self.feature_head(spectral_cube)
         spectral_feature = self.feature_body(spectral_feature)
-        base_logits = self.base_head(spectral_feature)
+        basis_logits = self.basis_head(spectral_feature)
+        spectral_basis = torch.sigmoid(basis_logits.flatten(1).view(-1, self.num_bands, self.num_endmembers))
 
-        return spectral_feature, base_logits, spectral_weights
+        return spectral_feature, spectral_basis, spectral_weights
 
 
 class PanSpatialBranch(nn.Module):
@@ -214,14 +220,16 @@ class PanSpatialBranch(nn.Module):
 
 class FusionNet(nn.Module):
 
-    def __init__(self, num_bands=16, msfa_size=4, spatial_ratio=2, feature_channels=64):
+    def __init__(self, num_bands=16, num_endmembers=6, msfa_size=4, spatial_ratio=2, feature_channels=64):
         super().__init__()
 
         self.num_bands = num_bands
+        self.num_endmembers = num_endmembers
         self.spatial_ratio = spatial_ratio
 
         self.mosaic_branch = MosaicSpectralBranch(
             num_bands=num_bands,
+            num_endmembers=num_endmembers,
             msfa_size=msfa_size,
             feature_channels=feature_channels,
         )
@@ -235,13 +243,7 @@ class FusionNet(nn.Module):
             ResidualBlock(feature_channels),
         )
 
-        # Estimate how much PAN detail should be injected into each spectral band.
-        self.band_gate = nn.Sequential(
-            nn.Conv2d(feature_channels, num_bands, kernel_size=3, padding=1),
-            nn.Sigmoid(),
-        )
-
-        self.detail_head = nn.Conv2d(feature_channels, num_bands, kernel_size=3, padding=1)
+        self.abundance_head = nn.Conv2d(feature_channels, num_endmembers, kernel_size=3, padding=1)
 
     def forward(self, mosaic, pan, return_aux=False):
         if mosaic.ndim != 4 or pan.ndim != 4:
@@ -255,23 +257,20 @@ class FusionNet(nn.Module):
 
         target_size = pan.shape[-2:]
 
-        spectral_feature, base_logits, spectral_weights = self.mosaic_branch(mosaic, target_size)
+        spectral_feature, spectral_basis, spectral_weights = self.mosaic_branch(mosaic, target_size)
         spatial_feature = self.pan_branch(pan)
 
         fusion_feature = torch.cat([spectral_feature, spatial_feature], dim=1)
         fusion_feature = self.fusion_body(fusion_feature)
 
-        band_gate = self.band_gate(fusion_feature)
-        pan_detail = self.detail_head(spatial_feature)
-
-        # Base spectral reconstruction + selectively injected PAN detail.
-        output_logits = base_logits + band_gate * pan_detail
-        hrhsi = torch.sigmoid(output_logits)
+        abundance = torch.softmax(self.abundance_head(fusion_feature), dim=1)
+        hrhsi = torch.einsum("bck,bkhw->bchw", spectral_basis, abundance)
 
         if return_aux:
             auxiliary = {
                 "spectral_weights": spectral_weights,
-                "band_gate": band_gate,
+                "spectral_basis": spectral_basis,
+                "abundance": abundance,
             }
             return hrhsi, auxiliary
 

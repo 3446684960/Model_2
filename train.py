@@ -161,7 +161,7 @@ def main(args):
     val_dataloader = DataLoader(val_set, batch_size=1, shuffle=False,
                                 num_workers=args.num_workers, pin_memory=use_cuda)
 
-    fuse_net = FusionNet(num_bands=args.num_bands, msfa_size=args.msfa_size,
+    fuse_net = FusionNet(num_bands=args.num_bands, num_endmembers=args.num_endmembers, msfa_size=args.msfa_size,
                          spatial_ratio=args.spatial_ratio, feature_channels=args.feature_channels).to(device)
     mosaic_degradation = MosaicDegradation(num_bands=args.num_bands, msfa_size=args.msfa_size,
                                            spatial_ratio=args.spatial_ratio).to(device)
@@ -211,6 +211,7 @@ if __name__ == "__main__":
     parser.add_argument("--noise_level", nargs="+", type=float, default=[0.01, 0.05])
     parser.add_argument("--spatial_ratio", type=int, default=2)
     parser.add_argument("--num_bands", type=int, default=16)
+    parser.add_argument("--num_endmembers", type=int, default=6)
     parser.add_argument("--feature_channels", type=int, default=64)
     parser.add_argument("--stride", type=int, default=64)
     parser.add_argument("--batch_size", type=int, default=8)
