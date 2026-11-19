@@ -3,6 +3,17 @@ __pycache__/
 *.py[cod]
 .ipynb_checkpoints/
 
+# Generated datasets, checkpoints, and caches
+*.mat
+*.pth
+*_cache.pkl
+
+# Root-level experiment outputs created by --idx
+/[0-9]*/
+
+# Nested comparison results, e.g. compare/UVPL/CAVE/1/result/
+/compare/**/[0-9]*/result/
+
 # Method-local experiments:
 # compare/<model>/<experiment-id>/
 # Ignore everything except record/record.json
