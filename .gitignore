@@ -8,8 +8,6 @@ __pycache__/
 *.pth
 *_cache.pkl
 
-# Root-level experiment outputs created by --idx
-/[0-9]*/
 
 # Nested comparison results, e.g. compare/UVPL/CAVE/1/result/
 /compare/**/[0-9]*/result/

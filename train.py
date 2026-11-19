@@ -124,8 +124,22 @@ def train(fuse_net: nn.Module, mosaic_degradation: nn.Module, pan_degradation: n
     print(f"Best epoch: {best_epoch}, Best PSNR: {best_psnr:.4f}")
 
 
+def create_experiment_dir(args):
+    version_dir = os.path.join(args.output_root, args.dataset, args.model_name, args.version_name)
+    os.makedirs(version_dir, exist_ok=True)
+
+    run_ids = [int(name) for name in os.listdir(version_dir)
+               if name.isdigit() and os.path.isdir(os.path.join(version_dir, name))]
+    run_id = max(run_ids, default=-1) + 1
+    experiment_dir = os.path.join(version_dir, str(run_id))
+    os.makedirs(experiment_dir)
+
+    print("训练文件夹为：{}".format(experiment_dir))
+    return experiment_dir
+
+
 def main(args):
-    experiment_dir = os.path.join("./", str(args.idx))
+    experiment_dir = create_experiment_dir(args)
     args.cache_path = experiment_dir
     args.dir_model = os.path.join(experiment_dir, "model")
     args.record_path = os.path.join(experiment_dir, "record.json")
@@ -153,10 +167,18 @@ def main(args):
                                            spatial_ratio=args.spatial_ratio).to(device)
     pan_degradation = PanDegradation(num_bands=args.num_bands).to(device)
 
-    optimizer = torch.optim.Adam([
-        {"params": fuse_net.parameters(), "lr": args.lr},
-        {"params": pan_degradation.parameters(), "lr": args.lr_response},
-    ])
+    optimizer_params = [{"params": fuse_net.parameters(), "lr": args.lr}]
+
+    if args.optimize_srf:
+        optimizer_params.append({"params": pan_degradation.parameters(), "lr": args.lr_response})
+    else:
+        true_response = torch.tensor([1., 1, 2, 4, 8, 9, 10, 12, 16, 12, 10, 9, 7, 3, 2, 1], device=device)
+        true_response = true_response / true_response.sum()
+        with torch.no_grad():
+            pan_degradation.response_logits.copy_(torch.log(true_response).view(1, -1, 1, 1))
+        pan_degradation.response_logits.requires_grad_(False)
+
+    optimizer = torch.optim.Adam(optimizer_params)
 
     args.start_epoch = 0
     args.best_epoch = 0
@@ -180,8 +202,10 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train mosaic and PAN fusion model")
-    parser.add_argument("--idx", type=int, default=1)
     parser.add_argument("--dataset", type=str, default="CAVE")
+    parser.add_argument("--output_root", type=str, default=".")
+    parser.add_argument("--model_name", type=str, default="Model_L_2")
+    parser.add_argument("--version_name", type=str, default="v0")
     parser.add_argument("--train_size", type=int, default=128)
     parser.add_argument("--msfa_size", type=int, default=4)
     parser.add_argument("--noise_level", nargs="+", type=float, default=[0.01, 0.05])
@@ -194,6 +218,7 @@ if __name__ == "__main__":
     parser.add_argument("--save_freq", type=int, default=50)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--lr_response", type=float, default=1e-5)
+    parser.add_argument("--optimize_srf", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--lambda_pan", type=float, default=1.0)
     parser.add_argument("--device", type=str, default="0")
     parser.add_argument("--num_workers", type=int, default=1)
