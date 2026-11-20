@@ -12,6 +12,9 @@ import scipy
 import math, random
 
 
+SIMULATED_PAN_RESPONSE = (1., 1, 2, 4, 8, 9, 10, 12, 16, 12, 10, 9, 7, 3, 2, 1)
+
+
 def pixel_shuffle(tensor, scale_factor):
     num, channels, height, width = tensor.shape
     if channels % (scale_factor ** 2) != 0:
@@ -124,7 +127,7 @@ class MakeSimulateDataset(Dataset):
                 mosaic_noise = numpy.clip(mosaic_noise, a_min=0, a_max=1.0)
 
                 # PAN simulate
-                spe_res = numpy.array([1., 1, 2, 4, 8, 9, 10, 12, 16, 12, 10, 9, 7, 3, 2, 1])
+                spe_res = numpy.array(SIMULATED_PAN_RESPONSE)
                 spe_res /= spe_res.sum()
                 pan = numpy.sum(hrms * spe_res, axis=-1, keepdims=True)
                 # adding noise, set numpy.random.seed(42)

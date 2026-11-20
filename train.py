@@ -1,72 +1,35 @@
 import argparse
 import json
+import math
 import os
 import time
 
-import numpy
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import tqdm
 from torch.utils.data import DataLoader
 
 import quality_index
-from GetDataSet import MakeSimulateDataset
-from degradation import MosaicDegradation, PanDegradation
+from GetDataSet import MakeSimulateDataset, SIMULATED_PAN_RESPONSE
+from degradation import MosaicDegradation, create_wald_inputs
 from model import FusionNet
 
 
-def create_gaussian_kernel(kernel_size, sigma, device, dtype):
-    coordinates = torch.arange(kernel_size, device=device, dtype=dtype) - kernel_size // 2
-    kernel_1d = torch.exp(-(coordinates ** 2) / (2 * sigma ** 2))
-    kernel_1d = kernel_1d / kernel_1d.sum()
-    return torch.outer(kernel_1d, kernel_1d).view(1, 1, kernel_size, kernel_size)
+def clipped_gaussian_nll(prediction, observation, sigma):
+    interior = 0.5 * ((observation - prediction) / sigma).square() + math.log(sigma * math.sqrt(2 * math.pi))
+    lower_tail = -torch.special.log_ndtr(-prediction / sigma)
+    upper_tail = -torch.special.log_ndtr((prediction - 1) / sigma)
+    return torch.where(observation <= 0, lower_tail, torch.where(observation >= 1, upper_tail, interior)).mean()
 
 
-def blur_pan(pan, kernel_size, sigma_min, sigma_max):
-    sigma = torch.empty(1, device=pan.device).uniform_(sigma_min, sigma_max).item()
-    kernel = create_gaussian_kernel(kernel_size, sigma, pan.device, pan.dtype)
-    padding = kernel_size // 2
-    return F.conv2d(F.pad(pan, (padding, padding, padding, padding), mode="reflect"), kernel)
+def wald_measurements(fuse_net, mosaic_degradation, mosaic, pan, args, generator=None):
+    mosaic_low, pan_low, holdout = create_wald_inputs(mosaic, pan, args.msfa_size, args.spatial_ratio, generator)
+    wald_hsi = fuse_net(mosaic_low, pan_low)
+    mosaic_hat = mosaic_degradation.sample_msfa(wald_hsi)
+    return mosaic_hat[holdout], mosaic[holdout]
 
 
-def create_spectral_leakage_matrix(num_bands, leakage, sigma, device, dtype):
-    positions = torch.arange(num_bands, device=device, dtype=dtype)
-    distance = positions[:, None] - positions[None, :]
-    neighbours = torch.exp(-(distance ** 2) / (2 * sigma ** 2))
-    neighbours.fill_diagonal_(0)
-    neighbours = neighbours / neighbours.sum(dim=1, keepdim=True)
-    identity = torch.eye(num_bands, device=device, dtype=dtype)
-    return (1 - leakage) * identity + leakage * neighbours
-
-
-def degrade_mosaic_input(mosaic, msfa_reconstruction, msfa_size, max_leakage, leakage_sigma):
-    aligned_cube = msfa_reconstruction(mosaic, mosaic.shape[-2:])
-    leakage = torch.empty(1, device=mosaic.device).uniform_(0, max_leakage).item()
-    response = create_spectral_leakage_matrix(aligned_cube.shape[1], leakage, leakage_sigma,
-                                               mosaic.device, mosaic.dtype)
-    leaked_cube = torch.einsum("ij,bjhw->bihw", response, aligned_cube)
-
-    mask = torch.zeros(1, aligned_cube.shape[1], msfa_size, msfa_size,
-                       device=mosaic.device, dtype=mosaic.dtype)
-    for row in range(msfa_size):
-        for col in range(msfa_size):
-            mask[0, row * msfa_size + col, row, col] = 1
-
-    repeat_h = mosaic.shape[-2] // msfa_size
-    repeat_w = mosaic.shape[-1] // msfa_size
-    mask = mask.repeat(1, 1, repeat_h, repeat_w)
-    return torch.sum(leaked_cube * mask, dim=1, keepdim=True)
-
-
-def create_degraded_inputs(mosaic, pan, msfa_reconstruction, args):
-    degraded_mosaic = degrade_mosaic_input(mosaic, msfa_reconstruction, args.msfa_size,
-                                            args.mosaic_max_leakage, args.mosaic_leakage_sigma)
-    degraded_pan = blur_pan(pan, args.pan_blur_kernel, args.pan_blur_sigma_min, args.pan_blur_sigma_max)
-    return degraded_mosaic, degraded_pan
-
-
-def train(fuse_net: nn.Module, mosaic_degradation: nn.Module, pan_degradation: nn.Module,
+def train(fuse_net: nn.Module, mosaic_degradation: nn.Module,
           optimizer, train_dataloader, val_dataloader, args):
     print("===> Begin Training!")
 
@@ -78,12 +41,9 @@ def train(fuse_net: nn.Module, mosaic_degradation: nn.Module, pan_degradation: n
 
     for epoch in range(start_epoch + 1, args.epochs + 1):
         fuse_net.train()
-        pan_degradation.train()
         epoch_start_time = time.time()
 
         loss_sum = 0.0
-        loss_mosaic_sum = 0.0
-        loss_pan_sum = 0.0
 
         for mosaic, pan in tqdm.tqdm(train_dataloader, desc=f"Epoch {epoch}/{args.epochs}"):
             mosaic = mosaic.to(device, non_blocking=True)
@@ -91,36 +51,24 @@ def train(fuse_net: nn.Module, mosaic_degradation: nn.Module, pan_degradation: n
 
             optimizer.zero_grad()
 
-            if args.degraded_input_training:
-                mosaic_input, pan_input = create_degraded_inputs(
-                    mosaic, pan, fuse_net.mosaic_branch.msfa_reconstruction, args
-                )
-            else:
-                mosaic_input, pan_input = mosaic, pan
-
-            hrhsi_hat = fuse_net(mosaic_input, pan_input)
-            mosaic_hat = mosaic_degradation(hrhsi_hat)
-            pan_hat = pan_degradation(hrhsi_hat)
-
-            loss_mosaic = F.l1_loss(mosaic_hat, mosaic)
-            loss_pan = F.l1_loss(pan_hat, pan)
-
-            loss = loss_mosaic + args.lambda_pan * loss_pan
+            prediction, observation = wald_measurements(fuse_net, mosaic_degradation, mosaic, pan, args)
+            loss = clipped_gaussian_nll(prediction, observation, args.mosaic_sigma)
 
             loss.backward()
             optimizer.step()
 
             loss_sum += loss.detach().item()
-            loss_mosaic_sum += loss_mosaic.detach().item()
-            loss_pan_sum += loss_pan.detach().item()
 
         loss_avg = loss_sum / len(train_dataloader)
-        loss_mosaic_avg = loss_mosaic_sum / len(train_dataloader)
-        loss_pan_avg = loss_pan_sum / len(train_dataloader)
 
         fuse_net.eval()
-        pan_degradation.eval()
         psnr_sum = 0.0
+        sam_sum = 0.0
+        wald_val_error = 0.0
+        wald_val_count = 0
+        val_generator = torch.Generator(device=device).manual_seed(0)
+        ratio = args.spatial_ratio
+        alignment = args.msfa_size * ratio
 
         with torch.no_grad():
             for mosaic, pan, hrhsi in val_dataloader:
@@ -130,14 +78,25 @@ def train(fuse_net: nn.Module, mosaic_degradation: nn.Module, pan_degradation: n
 
                 prediction = fuse_net(mosaic, pan)
                 psnr_sum += quality_index.calc_psnr(hrhsi, prediction).item()
+                sam_sum += quality_index.calc_sam(hrhsi, prediction).item()
+
+                h = mosaic.shape[-2] // alignment * alignment
+                w = mosaic.shape[-1] // alignment * alignment
+                if min(h, w) >= 2 * alignment:
+                    val_prediction, val_observation = wald_measurements(
+                        fuse_net, mosaic_degradation, mosaic[..., :h, :w], pan[..., :h * ratio, :w * ratio],
+                        args, val_generator
+                    )
+                    wald_val_error += (val_prediction - val_observation).abs().sum().item()
+                    wald_val_count += val_observation.numel()
 
         psnr_avg = psnr_sum / len(val_dataloader)
-        spectral_response = pan_degradation.get_spectral_response().detach().flatten().cpu()
-
+        sam_avg = sam_sum / len(val_dataloader)
+        wald_val_mae = wald_val_error / wald_val_count if wald_val_count else None
         checkpoint = {
+            "training_mode": "wald_ea",
             "epoch": epoch,
             "fuse_net": fuse_net.state_dict(),
-            "pan_degradation": pan_degradation.state_dict(),
             "optimizer": optimizer.state_dict(),
             "best_psnr": max(best_psnr, psnr_avg),
             "best_epoch": epoch if psnr_avg > best_psnr else best_epoch,
@@ -160,23 +119,20 @@ def train(fuse_net: nn.Module, mosaic_degradation: nn.Module, pan_degradation: n
             record.append({
                 "epoch": epoch,
                 "loss": loss_avg,
-                "loss_mosaic": loss_mosaic_avg,
-                "loss_pan": loss_pan_avg,
+                "wald_val_mae": wald_val_mae,
                 "psnr": psnr_avg,
+                "sam": sam_avg,
                 "best_psnr": best_psnr,
                 "best_epoch": best_epoch,
-                "pan_response": spectral_response.tolist(),
             })
 
             with open(args.record_path, "w") as file:
                 json.dump(record, file, indent=2)
 
-        print(
-            f"Epoch: {epoch} | loss: {loss_avg:.6f} | mosaic: {loss_mosaic_avg:.6f} | "
-            f"pan: {loss_pan_avg:.6f} | psnr: {psnr_avg:.4f} | best: {best_psnr:.4f} "
-            f"({best_epoch}) | time: {(time.time() - epoch_start_time) / 60:.2f} min"
-        )
-        print("PAN response:", numpy.array2string(spectral_response.numpy(), precision=4, suppress_small=True))
+        val_mae = f"{wald_val_mae:.6f}" if wald_val_mae is not None else "n/a"
+        print(f"Epoch: {epoch} | wald NLL: {loss_avg:.6f} | val Wald MAE: {val_mae} | psnr: {psnr_avg:.4f} | "
+              f"sam: {sam_avg:.4f} | best: {best_psnr:.4f} ({best_epoch}) | "
+              f"time: {(time.time() - epoch_start_time) / 60:.2f} min")
 
     print(f"Total time: {(time.time() - total_start_time) / 60:.2f} min")
     print(f"Best epoch: {best_epoch}, Best PSNR: {best_psnr:.4f}")
@@ -197,15 +153,29 @@ def create_experiment_dir(args):
 
 
 def main(args):
+    if args.msfa_size != 4 or args.num_bands != len(SIMULATED_PAN_RESPONSE):
+        raise ValueError("The simulator uses a 4x4 MSFA with 16 bands.")
+    if args.spatial_ratio < 2:
+        raise ValueError("Wald training requires spatial_ratio >= 2.")
+    msfa_alignment = args.msfa_size * args.spatial_ratio
+    wald_alignment = msfa_alignment * args.spatial_ratio
+    if args.train_size < 2 * wald_alignment or args.train_size % wald_alignment:
+        raise ValueError(f"train_size must be a multiple of {wald_alignment} and at least {2 * wald_alignment}.")
+    if args.stride < 1 or args.stride % msfa_alignment:
+        raise ValueError(f"stride must be a positive multiple of {msfa_alignment} to preserve MSFA phase.")
+    if len(args.noise_level) != 2 or not 0 <= args.noise_level[0] <= args.noise_level[1]:
+        raise ValueError("noise_level must contain two non-negative bounds in ascending order.")
+    default_sigma = sum(args.noise_level) / 2
+    args.mosaic_sigma = default_sigma if args.mosaic_sigma is None else args.mosaic_sigma
+    if not math.isfinite(args.mosaic_sigma) or args.mosaic_sigma <= 0:
+        raise ValueError("mosaic_sigma must be positive and finite.")
+
     experiment_dir = create_experiment_dir(args)
     args.cache_path = experiment_dir
     args.dir_model = os.path.join(experiment_dir, "model")
     args.record_path = os.path.join(experiment_dir, "record.json")
 
     os.makedirs(args.dir_model, exist_ok=True)
-
-    if not args.resume and args.record and os.path.exists(args.record_path):
-        os.remove(args.record_path)
 
     use_cuda = torch.cuda.is_available()
     device = torch.device(f"cuda:{args.device}" if use_cuda else "cpu")
@@ -223,31 +193,19 @@ def main(args):
                          spatial_ratio=args.spatial_ratio, feature_channels=args.feature_channels).to(device)
     mosaic_degradation = MosaicDegradation(num_bands=args.num_bands, msfa_size=args.msfa_size,
                                            spatial_ratio=args.spatial_ratio).to(device)
-    pan_degradation = PanDegradation(num_bands=args.num_bands).to(device)
-
-    optimizer_params = [{"params": fuse_net.parameters(), "lr": args.lr}]
-
-    if args.optimize_srf:
-        optimizer_params.append({"params": pan_degradation.parameters(), "lr": args.lr_response})
-    else:
-        true_response = torch.tensor([1., 1, 2, 4, 8, 9, 10, 12, 16, 12, 10, 9, 7, 3, 2, 1], device=device)
-        true_response = true_response / true_response.sum()
-        with torch.no_grad():
-            pan_degradation.response_logits.copy_(torch.log(true_response).view(1, -1, 1, 1))
-        pan_degradation.response_logits.requires_grad_(False)
-
-    optimizer = torch.optim.Adam(optimizer_params)
+    optimizer = torch.optim.Adam(fuse_net.parameters(), lr=args.lr)
 
     args.start_epoch = 0
     args.best_epoch = 0
     args.best_psnr = float("-inf")
 
     if args.resume:
-        checkpoint_path = args.resume if os.path.isfile(args.resume) else os.path.join(args.dir_model, args.resume)
+        checkpoint_path = os.path.expanduser(args.resume)
         print("==> Load checkpoint:", checkpoint_path)
         checkpoint = torch.load(checkpoint_path, map_location=device)
+        if checkpoint.get("training_mode") != "wald_ea":
+            raise ValueError("--resume requires a Wald EA checkpoint.")
         fuse_net.load_state_dict(checkpoint["fuse_net"])
-        pan_degradation.load_state_dict(checkpoint["pan_degradation"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         args.start_epoch = checkpoint.get("epoch", 0)
         args.best_epoch = checkpoint.get("best_epoch", args.start_epoch)
@@ -255,11 +213,11 @@ def main(args):
     else:
         print("==> Train from scratch")
 
-    train(fuse_net, mosaic_degradation, pan_degradation, optimizer, train_dataloader, val_dataloader, args)
+    train(fuse_net, mosaic_degradation, optimizer, train_dataloader, val_dataloader, args)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train mosaic and PAN fusion model")
+    parser = argparse.ArgumentParser(description="Train Wald Mosaic–PAN fusion with EA")
     parser.add_argument("--dataset", type=str, default="CAVE")
     parser.add_argument("--output_root", type=str, default=".")
     parser.add_argument("--model_name", type=str, default="Model_L_2")
@@ -276,15 +234,7 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=1000)
     parser.add_argument("--save_freq", type=int, default=50)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--lr_response", type=float, default=1e-5)
-    parser.add_argument("--optimize_srf", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--degraded_input_training", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--mosaic_max_leakage", type=float, default=0.15)
-    parser.add_argument("--mosaic_leakage_sigma", type=float, default=1.0)
-    parser.add_argument("--pan_blur_kernel", type=int, default=7)
-    parser.add_argument("--pan_blur_sigma_min", type=float, default=0.5)
-    parser.add_argument("--pan_blur_sigma_max", type=float, default=1.5)
-    parser.add_argument("--lambda_pan", type=float, default=1.0)
+    parser.add_argument("--mosaic_sigma", type=float, default=None, help="Mosaic observation noise, defaults to midpoint of noise_level")
     parser.add_argument("--device", type=str, default="0")
     parser.add_argument("--num_workers", type=int, default=1)
     parser.add_argument("--resume", type=str, default="")

@@ -42,11 +42,14 @@ class MosaicDegradation(nn.Module):
 
         # Spatial degradation:
         # [B, 16, H, W] -> [B, 16, H/2, W/2]   #先不建模PSF
-        low_hsi = F.avg_pool2d(hrhsi, kernel_size=self.spatial_ratio, stride=self.spatial_ratio,)
+        low_hsi = F.avg_pool2d(hrhsi, kernel_size=self.spatial_ratio, stride=self.spatial_ratio)
+        return self.sample_msfa(low_hsi)
 
-        low_height = low_hsi.shape[-2]
-        low_width = low_hsi.shape[-1]
+    def sample_msfa(self, hsi):
+        if hsi.ndim != 4 or hsi.shape[1] != self.num_bands:
+            raise ValueError(f"hsi must have shape [B, {self.num_bands}, H, W].")
 
+        low_height, low_width = hsi.shape[-2:]
         if (low_height % self.msfa_size != 0 or low_width % self.msfa_size != 0):
             raise ValueError("The low-resolution HSI size must be divisible " "by msfa_size.")
 
@@ -57,9 +60,48 @@ class MosaicDegradation(nn.Module):
         mask = self.msfa_mask.repeat(1, 1, repeat_h, repeat_w)
 
         # Each spatial position keeps only one spectral band.
-        mosaic = torch.sum(low_hsi * mask, dim=1, keepdim=True,)
+        return torch.sum(hsi * mask, dim=1, keepdim=True)
 
-        return mosaic
+
+def create_wald_inputs(mosaic, pan, msfa_size=4, spatial_ratio=2, generator=None):
+    batch, _, height, width = mosaic.shape
+    alignment = msfa_size * spatial_ratio
+    if height % alignment or width % alignment or min(height, width) < 2 * alignment:
+        raise ValueError("Wald Mosaic dimensions must contain at least two coarse MSFA tiles and align with the scale.")
+    if pan.shape != (batch, 1, height * spatial_ratio, width * spatial_ratio):
+        raise ValueError("PAN and Mosaic shapes do not match the Wald spatial ratio.")
+
+    phases = F.pixel_unshuffle(mosaic, msfa_size)
+    num_phases, phase_height, phase_width = phases.shape[1:]
+    rows = torch.arange(phase_height, device=mosaic.device)
+    cols = torch.arange(phase_width, device=mosaic.device)
+    parity = (rows[:, None] % 2) * 2 + cols[None, :] % 2
+    held_parity = torch.randint(4, (batch, num_phases, 1, 1), device=mosaic.device, generator=generator)
+    held_out = parity == held_parity
+
+    # 同相位低通，目标读数不参与滤波；同时滤波权重以归一化有效样本。
+    values = phases.masked_fill(held_out, 0)
+    observed = (~held_out).to(mosaic.dtype)
+    filtered = F.avg_pool2d(torch.stack((values, observed), dim=2).flatten(0, 1), 3, 1, 1)
+
+    # 粗网格像素 j 的中心落在原网格 s*j+(s-1)/2，再换算到对应相位的采样坐标。
+    row_phase = torch.arange(msfa_size, device=mosaic.device, dtype=mosaic.dtype).repeat_interleave(msfa_size)
+    col_phase = torch.arange(msfa_size, device=mosaic.device, dtype=mosaic.dtype).repeat(msfa_size)
+    row_offset = (spatial_ratio - 1) * (row_phase + 0.5) / msfa_size
+    col_offset = (spatial_ratio - 1) * (col_phase + 0.5) / msfa_size
+    y = rows[:phase_height // spatial_ratio] * spatial_ratio + row_offset[:, None]
+    x = cols[:phase_width // spatial_ratio] * spatial_ratio + col_offset[:, None]
+    y = (2 * y / (phase_height - 1) - 1).unsqueeze(-1)
+    x = (2 * x / (phase_width - 1) - 1).unsqueeze(-2)
+    grid_x, grid_y = torch.broadcast_tensors(x, y)
+    grid = torch.stack((grid_x, grid_y), dim=-1).repeat(batch, 1, 1, 1)
+    samples = F.grid_sample(filtered, grid, padding_mode="border", align_corners=True)
+    coarse_phases = (samples[:, 0] / samples[:, 1].clamp_min(1e-6)).unflatten(0, (batch, num_phases))
+
+    coarse_mosaic = F.pixel_shuffle(coarse_phases, msfa_size)
+    coarse_pan = F.avg_pool2d(pan, spatial_ratio, spatial_ratio)
+    holdout_mask = F.pixel_shuffle(held_out.to(mosaic.dtype), msfa_size).bool()
+    return coarse_mosaic, coarse_pan, holdout_mask
 
 
 
