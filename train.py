@@ -6,12 +6,13 @@ import time
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import tqdm
 from torch.utils.data import DataLoader
 
 import quality_index
 from GetDataSet import MakeSimulateDataset, SIMULATED_PAN_RESPONSE
-from degradation import MosaicDegradation, create_wald_inputs
+from degradation import MosaicDegradation, PanDegradation, create_wald_inputs, srf_anchor_observations
 from model import FusionNet
 
 
@@ -26,11 +27,11 @@ def wald_measurements(fuse_net, mosaic_degradation, mosaic, pan, args, generator
     mosaic_low, pan_low, holdout = create_wald_inputs(mosaic, pan, args.msfa_size, args.spatial_ratio, generator)
     wald_hsi = fuse_net(mosaic_low, pan_low)
     mosaic_hat = mosaic_degradation.sample_msfa(wald_hsi)
-    return mosaic_hat[holdout], mosaic[holdout]
+    return mosaic_hat[holdout], mosaic[holdout], wald_hsi, pan_low
 
 
-def train(fuse_net: nn.Module, mosaic_degradation: nn.Module,
-          optimizer, train_dataloader, val_dataloader, args):
+def train(fuse_net: nn.Module, mosaic_degradation: nn.Module, pan_degradation: nn.Module,
+          optimizer, optimizer_srf, train_dataloader, val_dataloader, args):
     print("===> Begin Training!")
 
     device = next(fuse_net.parameters()).device
@@ -38,37 +39,76 @@ def train(fuse_net: nn.Module, mosaic_degradation: nn.Module,
     best_epoch = getattr(args, "best_epoch", 0)
     best_psnr = getattr(args, "best_psnr", float("-inf"))
     total_start_time = time.time()
+    ratio = args.spatial_ratio
+    alignment = args.msfa_size * ratio
+    pan_scale = args.pan_residual_scale
+    reference_srf = torch.tensor(SIMULATED_PAN_RESPONSE)
+    reference_srf /= reference_srf.sum()
 
     for epoch in range(start_epoch + 1, args.epochs + 1):
         fuse_net.train()
         epoch_start_time = time.time()
+        use_wald_pan = epoch > args.srf_warmup_end
 
         loss_sum = 0.0
+        loss_mosaic_sum = 0.0
+        loss_pan_low_sum = 0.0
+        loss_srf_anchor_sum = 0.0
+        loss_srf_wald_sum = 0.0
 
         for mosaic, pan in tqdm.tqdm(train_dataloader, desc=f"Epoch {epoch}/{args.epochs}"):
             mosaic = mosaic.to(device, non_blocking=True)
             pan = pan.to(device, non_blocking=True)
 
+            # 更新 EA 时，SRF 只作为固定的光谱投影。
             optimizer.zero_grad()
-
-            prediction, observation = wald_measurements(fuse_net, mosaic_degradation, mosaic, pan, args)
-            loss = clipped_gaussian_nll(prediction, observation, args.mosaic_sigma)
-
+            prediction, observation, wald_hsi, wald_pan = wald_measurements(fuse_net, mosaic_degradation, mosaic, pan, args)
+            loss_mosaic = clipped_gaussian_nll(prediction, observation, args.mosaic_sigma)
+            loss_pan_low = wald_hsi.new_zeros(())
+            if use_wald_pan:
+                wald_spectra = F.avg_pool2d(wald_hsi, ratio, ratio)
+                wald_pan_mean = F.avg_pool2d(wald_pan, ratio, ratio)
+                response = pan_degradation.get_spectral_response().detach()
+                pan_hat = F.conv2d(wald_spectra, response)
+                loss_pan_low = F.smooth_l1_loss(pan_hat / pan_scale, wald_pan_mean / pan_scale)
+            loss = loss_mosaic + args.lambda_pan_low * loss_pan_low
             loss.backward()
             optimizer.step()
 
-            loss_sum += loss.detach().item()
+            # 更新 SRF 时，用实测配对做锚点，Wald 重建只提供固定的光谱估计。
+            optimizer_srf.zero_grad()
+            spectra, pan_mean, weights = srf_anchor_observations(mosaic, pan, args.msfa_size, ratio)
+            anchor_error = F.smooth_l1_loss(pan_degradation(spectra) / pan_scale, pan_mean / pan_scale, reduction="none")
+            loss_srf_anchor = (weights * anchor_error).sum() / weights.sum().clamp_min(1e-6)
+            loss_srf_wald = wald_hsi.new_zeros(())
+            if use_wald_pan:
+                pan_hat = pan_degradation(wald_spectra.detach())
+                loss_srf_wald = F.smooth_l1_loss(pan_hat / pan_scale, wald_pan_mean / pan_scale)
+            loss_srf = loss_srf_anchor + args.lambda_srf_wald * loss_srf_wald
+            loss_srf.backward()
+            optimizer_srf.step()
 
-        loss_avg = loss_sum / len(train_dataloader)
+            loss_sum += loss.detach().item()
+            loss_mosaic_sum += loss_mosaic.detach().item()
+            loss_pan_low_sum += loss_pan_low.detach().item()
+            loss_srf_anchor_sum += loss_srf_anchor.detach().item()
+            loss_srf_wald_sum += loss_srf_wald.detach().item()
+
+        train_batches = len(train_dataloader)
+        loss_avg = loss_sum / train_batches
+        loss_mosaic_avg = loss_mosaic_sum / train_batches
+        loss_pan_low_avg = loss_pan_low_sum / train_batches
+        loss_srf_anchor_avg = loss_srf_anchor_sum / train_batches
+        loss_srf_wald_avg = loss_srf_wald_sum / train_batches
 
         fuse_net.eval()
         psnr_sum = 0.0
         sam_sum = 0.0
         wald_val_error = 0.0
         wald_val_count = 0
+        srf_val_error = 0.0
+        srf_val_weight = 0.0
         val_generator = torch.Generator(device=device).manual_seed(0)
-        ratio = args.spatial_ratio
-        alignment = args.msfa_size * ratio
 
         with torch.no_grad():
             for mosaic, pan, hrhsi in val_dataloader:
@@ -80,10 +120,14 @@ def train(fuse_net: nn.Module, mosaic_degradation: nn.Module,
                 psnr_sum += quality_index.calc_psnr(hrhsi, prediction).item()
                 sam_sum += quality_index.calc_sam(hrhsi, prediction).item()
 
+                spectra, pan_mean, weights = srf_anchor_observations(mosaic, pan, args.msfa_size, ratio)
+                srf_val_error += (weights * (pan_degradation(spectra) - pan_mean).abs()).sum().item()
+                srf_val_weight += weights.sum().item()
+
                 h = mosaic.shape[-2] // alignment * alignment
                 w = mosaic.shape[-1] // alignment * alignment
                 if min(h, w) >= 2 * alignment:
-                    val_prediction, val_observation = wald_measurements(
+                    val_prediction, val_observation, _, _ = wald_measurements(
                         fuse_net, mosaic_degradation, mosaic[..., :h, :w], pan[..., :h * ratio, :w * ratio],
                         args, val_generator
                     )
@@ -93,11 +137,18 @@ def train(fuse_net: nn.Module, mosaic_degradation: nn.Module,
         psnr_avg = psnr_sum / len(val_dataloader)
         sam_avg = sam_sum / len(val_dataloader)
         wald_val_mae = wald_val_error / wald_val_count if wald_val_count else None
+        srf_val_mae = srf_val_error / srf_val_weight if srf_val_weight else None
+        spectral_response = pan_degradation.get_spectral_response().detach().flatten().cpu()
+        srf_rmse = (spectral_response - reference_srf).square().mean().sqrt().item()
+
         checkpoint = {
-            "training_mode": "wald_ea",
+            "training_mode": "wald_ea_srf",
             "epoch": epoch,
             "fuse_net": fuse_net.state_dict(),
+            "pan_degradation": pan_degradation.state_dict(),
             "optimizer": optimizer.state_dict(),
+            "optimizer_srf": optimizer_srf.state_dict(),
+            "srf_warmup_end": args.srf_warmup_end,
             "best_psnr": max(best_psnr, psnr_avg),
             "best_epoch": epoch if psnr_avg > best_psnr else best_epoch,
         }
@@ -119,7 +170,14 @@ def train(fuse_net: nn.Module, mosaic_degradation: nn.Module,
             record.append({
                 "epoch": epoch,
                 "loss": loss_avg,
+                "loss_mosaic": loss_mosaic_avg,
+                "loss_pan_low": loss_pan_low_avg,
+                "loss_srf_anchor": loss_srf_anchor_avg,
+                "loss_srf_wald": loss_srf_wald_avg,
                 "wald_val_mae": wald_val_mae,
+                "srf_val_mae": srf_val_mae,
+                "srf_rmse": srf_rmse,
+                "pan_response": spectral_response.tolist(),
                 "psnr": psnr_avg,
                 "sam": sam_avg,
                 "best_psnr": best_psnr,
@@ -130,9 +188,13 @@ def train(fuse_net: nn.Module, mosaic_degradation: nn.Module,
                 json.dump(record, file, indent=2)
 
         val_mae = f"{wald_val_mae:.6f}" if wald_val_mae is not None else "n/a"
-        print(f"Epoch: {epoch} | wald NLL: {loss_avg:.6f} | val Wald MAE: {val_mae} | psnr: {psnr_avg:.4f} | "
+        srf_mae = f"{srf_val_mae:.6f}" if srf_val_mae is not None else "n/a"
+        print(f"Epoch: {epoch} | Wald NLL: {loss_mosaic_avg:.6f} | PAN low: {loss_pan_low_avg:.6f} | "
+              f"val Wald MAE: {val_mae} | psnr: {psnr_avg:.4f} | "
               f"sam: {sam_avg:.4f} | best: {best_psnr:.4f} ({best_epoch}) | "
               f"time: {(time.time() - epoch_start_time) / 60:.2f} min")
+        print(f"SRF anchor: {loss_srf_anchor_avg:.6f} | SRF Wald: {loss_srf_wald_avg:.6f} | "
+              f"val SRF MAE: {srf_mae} | SRF RMSE: {srf_rmse:.6f}")
 
     print(f"Total time: {(time.time() - total_start_time) / 60:.2f} min")
     print(f"Best epoch: {best_epoch}, Best PSNR: {best_psnr:.4f}")
@@ -169,6 +231,12 @@ def main(args):
     args.mosaic_sigma = default_sigma if args.mosaic_sigma is None else args.mosaic_sigma
     if not math.isfinite(args.mosaic_sigma) or args.mosaic_sigma <= 0:
         raise ValueError("mosaic_sigma must be positive and finite.")
+    if not all(math.isfinite(value) and value > 0 for value in (args.lr_srf, args.pan_residual_scale)):
+        raise ValueError("lr_srf and pan_residual_scale must be positive and finite.")
+    if not all(math.isfinite(value) and value >= 0 for value in (args.lambda_pan_low, args.lambda_srf_wald)):
+        raise ValueError("PAN and SRF loss weights must be non-negative and finite.")
+    if args.srf_warmup_epochs < 0:
+        raise ValueError("srf_warmup_epochs must be non-negative.")
 
     experiment_dir = create_experiment_dir(args)
     args.cache_path = experiment_dir
@@ -193,31 +261,42 @@ def main(args):
                          spatial_ratio=args.spatial_ratio, feature_channels=args.feature_channels).to(device)
     mosaic_degradation = MosaicDegradation(num_bands=args.num_bands, msfa_size=args.msfa_size,
                                            spatial_ratio=args.spatial_ratio).to(device)
+    pan_degradation = PanDegradation(num_bands=args.num_bands).to(device)
     optimizer = torch.optim.Adam(fuse_net.parameters(), lr=args.lr)
+    optimizer_srf = torch.optim.Adam(pan_degradation.parameters(), lr=args.lr_srf)
 
     args.start_epoch = 0
     args.best_epoch = 0
     args.best_psnr = float("-inf")
+    args.srf_warmup_end = args.srf_warmup_epochs
 
     if args.resume:
         checkpoint_path = os.path.expanduser(args.resume)
         print("==> Load checkpoint:", checkpoint_path)
-        checkpoint = torch.load(checkpoint_path, map_location=device)
-        if checkpoint.get("training_mode") != "wald_ea":
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+        training_mode = checkpoint.get("training_mode")
+        if training_mode not in ("wald_ea", "wald_ea_srf"):
             raise ValueError("--resume requires a Wald EA checkpoint.")
         fuse_net.load_state_dict(checkpoint["fuse_net"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         args.start_epoch = checkpoint.get("epoch", 0)
         args.best_epoch = checkpoint.get("best_epoch", args.start_epoch)
         args.best_psnr = checkpoint.get("best_psnr", float("-inf"))
+        if training_mode == "wald_ea_srf":
+            pan_degradation.load_state_dict(checkpoint["pan_degradation"])
+            optimizer_srf.load_state_dict(checkpoint["optimizer_srf"])
+            args.srf_warmup_end = checkpoint["srf_warmup_end"]
+        else:
+            args.srf_warmup_end = args.start_epoch + args.srf_warmup_epochs
     else:
         print("==> Train from scratch")
 
-    train(fuse_net, mosaic_degradation, optimizer, train_dataloader, val_dataloader, args)
+    train(fuse_net, mosaic_degradation, pan_degradation, optimizer, optimizer_srf,
+          train_dataloader, val_dataloader, args)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train Wald Mosaic–PAN fusion with EA")
+    parser = argparse.ArgumentParser(description="Train Wald Mosaic–PAN fusion with EA and learn PAN SRF")
     parser.add_argument("--dataset", type=str, default="CAVE")
     parser.add_argument("--output_root", type=str, default=".")
     parser.add_argument("--model_name", type=str, default="Model_L_2")
@@ -234,6 +313,11 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=1000)
     parser.add_argument("--save_freq", type=int, default=50)
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr_srf", type=float, default=1e-3)
+    parser.add_argument("--srf_warmup_epochs", type=int, default=10)
+    parser.add_argument("--lambda_pan_low", type=float, default=0.1)
+    parser.add_argument("--lambda_srf_wald", type=float, default=0.1)
+    parser.add_argument("--pan_residual_scale", type=float, default=0.03)
     parser.add_argument("--mosaic_sigma", type=float, default=None, help="Mosaic observation noise, defaults to midpoint of noise_level")
     parser.add_argument("--device", type=str, default="0")
     parser.add_argument("--num_workers", type=int, default=1)

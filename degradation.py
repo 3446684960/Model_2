@@ -104,6 +104,18 @@ def create_wald_inputs(mosaic, pan, msfa_size=4, spatial_ratio=2, generator=None
     return coarse_mosaic, coarse_pan, holdout_mask
 
 
+def srf_anchor_observations(mosaic, pan, msfa_size, spatial_ratio):
+    spectra = F.pixel_unshuffle(mosaic, msfa_size)
+    tile_size = msfa_size * spatial_ratio
+    pan_mean = F.avg_pool2d(pan, tile_size, tile_size)
+    pan_var = (F.avg_pool2d(pan.square(), tile_size, tile_size) - pan_mean.square()).clamp_min(0)
+
+    # 每个 MSFA 单元的波段来自不同位置，优先使用平坦、曝光正常的区域。
+    exposed = (pan_mean > 0.05) & (pan_mean < 0.95)
+    valid_bands = ((spectra > 0) & (spectra < 1)).to(spectra.dtype).mean(dim=1, keepdim=True)
+    weights = exposed * valid_bands / (1 + pan_var / 0.03 ** 2)
+    return spectra, pan_mean, weights
+
 
 class PanDegradation(nn.Module):
 
